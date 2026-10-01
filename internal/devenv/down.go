@@ -9,14 +9,18 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
-// Down deletes the VM of the environment called o.Name, or of the only one, or else the only running one.
+// Down deletes the VM of the environment called o.Name, even if its state dir is gone.
+// Without a name, it picks the only environment, or else the only running one.
 // With purge, it also deletes the environment's state dir.
 func Down(ctx context.Context, o Options, purge bool, out io.Writer) error {
 	machines, err := Machines(ctx, o)
 	if err != nil {
 		return err
 	}
-	env, err := state.Existing(o.StateDir, o.Name, machines)
+	env, err := state.New(o.StateDir, o.Name)
+	if o.Name == "" {
+		env, err = state.Existing(o.StateDir, o.Name, machines)
+	}
 	if err != nil {
 		return err
 	}
