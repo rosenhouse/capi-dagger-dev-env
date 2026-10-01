@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -88,6 +90,22 @@ func (c Config) validate() error {
 		}
 		if p.On != Management && p.On != Workload {
 			errs = append(errs, fmt.Errorf("package %s has an unknown target %d", p.Name, p.On))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// checkPaths fails unless every command and package config directory exists under Root.
+func (c Config) checkPaths() error {
+	var errs []error
+	for _, command := range c.Commands {
+		if _, err := os.Stat(filepath.Join(c.Root, command)); err != nil {
+			errs = append(errs, fmt.Errorf("command %s not found under %s", command, c.Root))
+		}
+	}
+	for _, p := range c.Packages {
+		if _, err := os.Stat(filepath.Join(c.Root, p.Config)); err != nil {
+			errs = append(errs, fmt.Errorf("package %s's config %s not found under %s", p.Name, p.Config, c.Root))
 		}
 	}
 	return errors.Join(errs...)

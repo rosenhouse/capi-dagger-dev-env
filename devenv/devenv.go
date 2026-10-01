@@ -82,6 +82,9 @@ func Up(ctx context.Context, cfg Config, o Options) (*Environment, error) {
 			return nil, err
 		}
 	}
+	if err := cfg.checkPaths(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
 	e, err := start(ctx, o)
 	if err != nil {
 		return nil, err

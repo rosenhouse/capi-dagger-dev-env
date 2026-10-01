@@ -35,6 +35,10 @@ Kubeconfigs reach each API server through a proxy on 127.0.0.1, in front of a Da
 The proxy closes a connection whose client stops reading, such as a suspended `kubectl`, before it can stall the tunnel.
 A failure names the stage and the readiness gate that failed.
 
+Test both modules from the repository root with `go test ./... ./examples/greeting/...`.
+The example requires the tool at a commit on main, and `go.work` builds it against the local tool instead.
+After a change to the tool's API, bump the example's requirement once the change is on main.
+
 ## Use with your own controllers
 
 Add the tool to your module with `go get github.com/rosenhouse/capi-dagger-dev-env`.
