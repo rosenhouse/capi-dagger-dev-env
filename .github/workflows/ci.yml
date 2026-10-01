@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   SMOLVM_VERSION: 1.22.0
+  SMOLVM_LINUX_X86_64_SHA256: 00d2f057c963ff950846d4059af87bdddb7edf707750cdab863cb0879d6b339e
 jobs:
   unit:
     runs-on: ubuntu-24.04
@@ -24,10 +25,13 @@ jobs:
       - run: go test ./...
       - run: go generate ./...
       - run: test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
-  smolvm-smoke:
+  smolvm:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
+    env:
+      SMOLVM_IDLE_RECLAIM: "off"
     steps:
+      - uses: actions/checkout@v5
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -36,18 +40,29 @@ jobs:
           sudo udevadm settle
           test -w /dev/kvm
           grep -m1 'model name' /proc/cpuinfo
+      # smolvm expands disk templates beside its binary, so it needs a writable directory.
       - name: Install smolvm
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/smol-machines/smolvm/v${SMOLVM_VERSION}/scripts/install.sh" | bash -s -- --version "$SMOLVM_VERSION"
-          echo "$HOME/.smolvm" >> "$GITHUB_PATH"
-      - run: smolvm --version
-      - run: time smolvm machine run --net --image alpine -- uname -a
-      - name: Guest kernel config
-        run: |
-          smolvm machine run --net --image alpine -- sh -c 'zcat /proc/config.gz 2>/dev/null || echo no /proc/config.gz; cat /proc/filesystems; ls /sys/fs/cgroup; cat /sys/fs/cgroup/cgroup.controllers' > guest-kernel.txt || true
-          grep -E 'CONFIG_(MODULES|BRIDGE|BRIDGE_NETFILTER|VETH|VXLAN|IP_VS|IP_SET|NETFILTER_XT_MATCH_(STATISTIC|CONNTRACK|COMMENT|MULTIPORT|ADDRTYPE|PHYSDEV|MARK)|NETFILTER_XT_TARGET_(MASQUERADE|REDIRECT|MARK)|NF_TABLES|NFT_COMPAT|NF_NAT|OVERLAY_FS|MEMCG|CGROUP_BPF|SECCOMP_FILTER|USER_NS|FUSE_FS|BLK_DEV_LOOP)=' guest-kernel.txt || cat guest-kernel.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
+          curl -fsSLo "$RUNNER_TEMP/smolvm.tar.gz" "https://github.com/smol-machines/smolvm/releases/download/v$SMOLVM_VERSION/smolvm-$SMOLVM_VERSION-linux-x86_64.tar.gz"
+          echo "$SMOLVM_LINUX_X86_64_SHA256  $RUNNER_TEMP/smolvm.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/smolvm.tar.gz" -C "$HOME"
+          echo "$HOME/smolvm-$SMOLVM_VERSION-linux-x86_64" >>"$GITHUB_PATH"
+      - uses: actions/setup-go@v6
         with:
-          name: guest-kernel
-          path: guest-kernel.txt
+          go-version-file: go.mod
+      - run: go test -v ./internal/devenv/smolvm/
+        env:
+          DEVENV_SMOLVM_TESTS: "1"
+          DEVENV_SMOLVM_LOGS: ${{ runner.temp }}/smolvm-logs
+      - name: Keep console logs of machines left running
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/smolvm-logs"
+          for m in $(smolvm machine ls -q); do
+            cp "$(smolvm machine data-dir --name "$m")/agent-console.log" "$RUNNER_TEMP/smolvm-logs/$m-agent-console.log" || true
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolvm-logs
+          path: ${{ runner.temp }}/smolvm-logs
