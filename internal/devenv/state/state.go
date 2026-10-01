@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -57,7 +59,82 @@ func (e Env) Lock() (unlock func(), err error) {
 		}
 		return nil, err
 	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if _, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0); err != nil {
+		f.Close()
+		return nil, err
+	}
 	return func() { f.Close() }, nil
+}
+
+// Holder returns the ID of the process that holds the environment's lock, or 0 if none does.
+func (e Env) Holder() (int, error) {
+	f, err := os.Open(filepath.Join(e.Dir, "lock"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if err == nil {
+		return 0, nil
+	}
+	if !errors.Is(err, syscall.EWOULDBLOCK) {
+		return 0, err
+	}
+	pid, err := io.ReadAll(f)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(string(pid))
+}
+
+// List returns the environments under root, sorted by name.
+func List(root string) ([]Env, error) {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var envs []Env
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		env, err := New(root, entry.Name())
+		if err != nil {
+			continue
+		}
+		envs = append(envs, env)
+	}
+	return envs, nil
+}
+
+// Existing returns the environment called name under root, or the only one there if name is empty.
+func Existing(root, name string) (Env, error) {
+	envs, err := List(root)
+	if err != nil {
+		return Env{}, err
+	}
+	if name == "" {
+		if len(envs) != 1 {
+			return Env{}, fmt.Errorf("found %d environments in %s; pass --name", len(envs), root)
+		}
+		return envs[0], nil
+	}
+	for _, env := range envs {
+		if env.Name == name {
+			return env, nil
+		}
+	}
+	return Env{}, fmt.Errorf("no environment %s in %s", name, root)
 }
 
 // WriteKubeconfig points kubeconfig at a localhost port, names its entries <env>-<cluster>, and writes it to the env dir.

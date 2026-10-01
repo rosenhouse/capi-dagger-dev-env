@@ -118,3 +118,69 @@ func newEnv(t *testing.T, root, name string) state.Env {
 	}
 	return env
 }
+
+func TestHolderReportsTheProcessHoldingTheLock(t *testing.T) {
+	root := t.TempDir()
+	env := newEnv(t, root, "alpha")
+	if pid, err := env.Holder(); err != nil || pid != 0 {
+		t.Errorf("before Lock: Holder() = %d, %v", pid, err)
+	}
+
+	unlock, err := env.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := newEnv(t, root, "alpha").Holder(); err != nil || pid != os.Getpid() {
+		t.Errorf("while locked: Holder() = %d, %v; want %d", pid, err, os.Getpid())
+	}
+
+	unlock()
+	if pid, err := env.Holder(); err != nil || pid != 0 {
+		t.Errorf("after unlock: Holder() = %d, %v", pid, err)
+	}
+}
+
+func TestListFindsEnvironmentDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"beta", "alpha"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "stray-file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	envs, err := state.List(root)
+
+	if err != nil || len(envs) != 2 || envs[0].Name != "alpha" || envs[1].Name != "beta" {
+		t.Errorf("List() = %+v, %v", envs, err)
+	}
+}
+
+func TestListOfMissingRootIsEmpty(t *testing.T) {
+	if envs, err := state.List(filepath.Join(t.TempDir(), "missing")); err != nil || len(envs) != 0 {
+		t.Errorf("List() = %+v, %v", envs, err)
+	}
+}
+
+func TestExistingPicksTheOnlyEnvironmentWhenNameIsEmpty(t *testing.T) {
+	root := t.TempDir()
+	if _, err := state.Existing(root, ""); err == nil {
+		t.Error("no error without environments")
+	}
+	_ = os.MkdirAll(filepath.Join(root, "alpha"), 0o700)
+	if env, err := state.Existing(root, ""); err != nil || env.Name != "alpha" {
+		t.Errorf("Existing() = %+v, %v", env, err)
+	}
+	_ = os.MkdirAll(filepath.Join(root, "beta"), 0o700)
+	if _, err := state.Existing(root, ""); err == nil || !strings.Contains(err.Error(), "--name") {
+		t.Errorf("err = %v, want a hint to pass --name", err)
+	}
+	if env, err := state.Existing(root, "beta"); err != nil || env.Name != "beta" {
+		t.Errorf("Existing(beta) = %+v, %v", env, err)
+	}
+	if _, err := state.Existing(root, "gamma"); err == nil {
+		t.Error("no error for unknown environment")
+	}
+}
