@@ -1,0 +1,61 @@
+name: spike-platform
+on:
+  pull_request:
+    branches: [smol]
+    paths:
+      - .github/workflows/spike-platform.yml
+      - hack/spike/platform/**
+  workflow_dispatch:
+concurrency:
+  group: spike-platform-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  SMOLVM_VERSION: 1.22.0
+  SMOLVM_IDLE_RECLAIM: "off"
+jobs:
+  platform:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Install smolvm
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/smol-machines/smolvm/v${SMOLVM_VERSION}/scripts/install.sh" | bash -s -- --version "$SMOLVM_VERSION"
+          echo "$HOME/.smolvm" >> "$GITHUB_PATH"
+      - run: hack/spike/platform/run.sh host-tools
+      - name: Boot a bare VM and install tools
+        run: hack/spike/platform/run.sh boot
+      - name: Start dockerd and probe the kernel
+        run: hack/spike/platform/run.sh docker
+      - name: Session registry and Kind management cluster
+        run: hack/spike/platform/run.sh mgmt
+      - name: Cluster API, kapp-controller and the workload cluster
+        run: hack/spike/platform/run.sh platform
+      - run: hack/spike/platform/run.sh resources before-branch plat
+      - name: Branch with published ports
+        run: hack/spike/platform/run.sh branch
+      - name: Both API servers from the host
+        run: hack/spike/platform/run.sh host-access
+      - name: Push through the branch port and run the image in both clusters
+        run: hack/spike/platform/run.sh registry
+      - run: hack/spike/platform/run.sh resources after-branch env
+      - if: always()
+        run: hack/spike/platform/run.sh summary
+      - if: failure()
+        run: hack/spike/platform/run.sh diag
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-diagnostics
+          path: |
+            ${{ runner.temp }}/platform/
+            !${{ runner.temp }}/platform/bin/
+            !${{ runner.temp }}/platform/*.tgz
+            !${{ runner.temp }}/platform/*.kubeconfig
+          retention-days: 7
