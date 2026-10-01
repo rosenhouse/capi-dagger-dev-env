@@ -1,0 +1,372 @@
+package smolvm_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
+)
+
+// TestMain lets the test binary stand in for smolvm: with FAKE_SMOLVM_CALL set, it records its
+// arguments and stdin there and replies with FAKE_SMOLVM_STDOUT, FAKE_SMOLVM_STDERR and FAKE_SMOLVM_EXIT.
+func TestMain(m *testing.M) {
+	if path := os.Getenv("FAKE_SMOLVM_CALL"); path != "" {
+		stdin, _ := io.ReadAll(os.Stdin)
+		call, _ := json.Marshal(fakeCall{Args: os.Args[1:], Stdin: string(stdin)})
+		if err := os.WriteFile(path, call, 0o644); err != nil {
+			panic(err)
+		}
+		fmt.Print(os.Getenv("FAKE_SMOLVM_STDOUT"))
+		fmt.Fprint(os.Stderr, os.Getenv("FAKE_SMOLVM_STDERR"))
+		code, _ := strconv.Atoi(os.Getenv("FAKE_SMOLVM_EXIT"))
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
+}
+
+type fakeCall struct {
+	Args  []string
+	Stdin string
+}
+
+type fake struct {
+	stdout, stderr string
+	exit           int
+}
+
+// start returns a CLI that runs the fake, and a function that returns the fake's last call.
+func (f fake) start(t *testing.T) (smolvm.CLI, func() fakeCall) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "call.json")
+	t.Setenv("FAKE_SMOLVM_CALL", path)
+	t.Setenv("FAKE_SMOLVM_STDOUT", f.stdout)
+	t.Setenv("FAKE_SMOLVM_STDERR", f.stderr)
+	t.Setenv("FAKE_SMOLVM_EXIT", strconv.Itoa(f.exit))
+	return smolvm.CLI{Path: os.Args[0]}, func() fakeCall {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var call fakeCall
+		if err := json.Unmarshal(data, &call); err != nil {
+			t.Fatal(err)
+		}
+		return call
+	}
+}
+
+func TestCheckVersionAcceptsThePinnedVersion(t *testing.T) {
+	c, call := fake{stdout: "smolvm 1.22.0\n"}.start(t)
+
+	if err := c.CheckVersion(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := call().Args; !reflect.DeepEqual(got, []string{"--version"}) {
+		t.Errorf("args = %q", got)
+	}
+}
+
+func TestCheckVersionRejectsAnotherVersion(t *testing.T) {
+	c, _ := fake{stdout: "smolvm 1.21.0\n"}.start(t)
+
+	err := c.CheckVersion(t.Context())
+
+	wantInstallHint(t, err, "1.21.0")
+}
+
+func TestCheckVersionRejectsUnexpectedOutput(t *testing.T) {
+	c, _ := fake{stdout: "smolvm\n"}.start(t)
+
+	wantInstallHint(t, c.CheckVersion(t.Context()), `"smolvm\n"`)
+}
+
+func TestCheckVersionExplainsHowToInstallAMissingSmolvm(t *testing.T) {
+	c := smolvm.CLI{Path: filepath.Join(t.TempDir(), "smolvm")}
+
+	wantInstallHint(t, c.CheckVersion(t.Context()), "no such file")
+}
+
+func wantInstallHint(t *testing.T, err error, cause string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("no error")
+	}
+	for _, want := range []string{cause, "smolvm 1.22.0", "scripts/install.sh | bash -s -- --version 1.22.0"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
+func TestCommandLines(t *testing.T) {
+	ports := []smolvm.Port{{Host: 18080, Guest: 8080}, {Host: 16443, Guest: 6443}}
+	for _, tc := range []struct {
+		name string
+		run  func(context.Context, smolvm.CLI) error
+		want []string
+	}{{
+		"create",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Create(ctx, "m", smolvm.MachineConfig{CPUs: 2, MemoryMiB: 512, StorageGiB: 3, OverlayGiB: 1, Ports: ports})
+		},
+		[]string{"machine", "create", "--name", "m", "--net", "--net-backend", "virtio-net",
+			"--cpus", "2", "--mem", "512", "--storage", "3", "--overlay", "1", "-p", "18080:8080", "-p", "16443:6443"},
+	}, {
+		"create with defaults",
+		func(ctx context.Context, c smolvm.CLI) error { return c.Create(ctx, "m", smolvm.MachineConfig{}) },
+		[]string{"machine", "create", "--name", "m", "--net", "--net-backend", "virtio-net"},
+	}, {
+		"create from checkpoint",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.CreateFromCheckpoint(ctx, "m", "/c/m.checkpoint")
+		},
+		[]string{"machine", "create", "--name", "m", "--from", "/c/m.checkpoint"},
+	}, {
+		"rebind ports",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.RebindPorts(ctx, "m", ports, []smolvm.Port{{Host: 28080, Guest: 8080}})
+		},
+		[]string{"machine", "update", "--name", "m", "--remove-port", "18080:8080", "--remove-port", "16443:6443", "-p", "28080:8080"},
+	}, {
+		"start",
+		func(ctx context.Context, c smolvm.CLI) error { return c.Start(ctx, "m", smolvm.StartOptions{}) },
+		[]string{"machine", "start", "--name", "m"},
+	}, {
+		"start branchable",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Start(ctx, "m", smolvm.StartOptions{Branchable: true})
+		},
+		[]string{"machine", "start", "--name", "m", "--branchable"},
+	}, {
+		"stop",
+		func(ctx context.Context, c smolvm.CLI) error { return c.Stop(ctx, "m") },
+		[]string{"machine", "stop", "--name", "m"},
+	}, {
+		"delete",
+		func(ctx context.Context, c smolvm.CLI) error { return c.Delete(ctx, "m", smolvm.DeleteOptions{}) },
+		[]string{"machine", "delete", "--name", "m", "-f"},
+	}, {
+		"delete cascade",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Delete(ctx, "m", smolvm.DeleteOptions{Cascade: true})
+		},
+		[]string{"machine", "delete", "--name", "m", "-f", "--cascade"},
+	}, {
+		"branch",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Branch(ctx, "src", "m", smolvm.BranchOptions{})
+		},
+		[]string{"machine", "branch", "--from", "src", "--name", "m"},
+	}, {
+		"branch frozen with ports",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Branch(ctx, "src", "m", smolvm.BranchOptions{FreezeSource: true, Ports: ports[:1]})
+		},
+		[]string{"machine", "branch", "--from", "src", "--name", "m", "--freeze-source", "-p", "18080:8080"},
+	}, {
+		"checkpoint",
+		func(ctx context.Context, c smolvm.CLI) error { return c.Checkpoint(ctx, "m", "/c/m.checkpoint") },
+		[]string{"machine", "checkpoint", "--name", "m", "-o", "/c/m.checkpoint"},
+	}, {
+		"exec",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Exec(ctx, "m", []string{"echo", "a b"}, smolvm.ExecOptions{Env: []string{"A=1", "B=2"}, Timeout: 1500 * time.Millisecond})
+		},
+		[]string{"machine", "exec", "--name", "m", "-e", "A=1", "-e", "B=2", "--timeout", "1500ms", "--stream", "--", "echo", "a b"},
+	}, {
+		"exec with stdin",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Exec(ctx, "m", []string{"cat"}, smolvm.ExecOptions{Stdin: strings.NewReader("")})
+		},
+		[]string{"machine", "exec", "--name", "m", "-i", "--", "cat"},
+	}, {
+		"exec detached",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Exec(ctx, "m", []string{"sleep", "9"}, smolvm.ExecOptions{Detach: true})
+		},
+		[]string{"machine", "exec", "--name", "m", "-d", "--", "sleep", "9"},
+	}, {
+		"run",
+		func(ctx context.Context, c smolvm.CLI) error {
+			_, err := c.Run(ctx, "m", "echo hi\nexit 0")
+			return err
+		},
+		[]string{"machine", "exec", "--name", "m", "--stream", "--", "sh", "-euc", "echo hi\nexit 0"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, call := fake{}.start(t)
+
+			if err := tc.run(t.Context(), c); err != nil {
+				t.Fatal(err)
+			}
+			if got := call().Args; !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("args =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+}
+
+// lsJSON is smolvm 1.22.0's `machine ls --json` output, trimmed to a few fields.
+const lsJSON = `[
+  {"branchable": true, "cpus": 1, "name": "src", "parent_machine": null, "pid": 41, "ports": 1, "state": "frozen"},
+  {"branchable": false, "cpus": 1, "name": "child", "parent_machine": "src", "pid": 42, "ports": 1, "state": "running"}
+]`
+
+func TestListParsesMachines(t *testing.T) {
+	c, call := fake{stdout: lsJSON}.start(t)
+
+	got, err := c.List(t.Context())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []smolvm.Machine{{Name: "src", State: smolvm.Frozen}, {Name: "child", State: smolvm.Running, Parent: "src"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("List() = %+v; want %+v", got, want)
+	}
+	if args := call().Args; !reflect.DeepEqual(args, []string{"machine", "ls", "--json"}) {
+		t.Errorf("args = %q", args)
+	}
+}
+
+func TestStatusParsesTheMachine(t *testing.T) {
+	c, call := fake{stdout: `{"name": "m", "parent_machine": null, "state": "created", "storage_gb": null}`}.start(t)
+
+	got, err := c.Status(t.Context(), "m")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (smolvm.Machine{Name: "m", State: smolvm.Created}); got != want {
+		t.Errorf("Status() = %+v; want %+v", got, want)
+	}
+	if args := call().Args; !reflect.DeepEqual(args, []string{"machine", "status", "--name", "m", "--json"}) {
+		t.Errorf("args = %q", args)
+	}
+}
+
+func TestStatusRejectsMalformedOutput(t *testing.T) {
+	c, _ := fake{stdout: "created"}.start(t)
+
+	if _, err := c.Status(t.Context(), "m"); err == nil {
+		t.Error("no error")
+	}
+}
+
+func TestDataDirTrimsTheNewline(t *testing.T) {
+	c, call := fake{stdout: "/home/u/.cache/smolvm/vms/628b49d96dcde97a\n"}.start(t)
+
+	got, err := c.DataDir(t.Context(), "m")
+
+	if err != nil || got != "/home/u/.cache/smolvm/vms/628b49d96dcde97a" {
+		t.Errorf("DataDir() = %q, %v", got, err)
+	}
+	if args := call().Args; !reflect.DeepEqual(args, []string{"machine", "data-dir", "--name", "m"}) {
+		t.Errorf("args = %q", args)
+	}
+}
+
+func TestCommandErrorsCarrySmolvmsStderr(t *testing.T) {
+	c, _ := fake{stderr: "Error: vm not found: m\n", exit: 1}.start(t)
+
+	err := c.Stop(t.Context(), "m")
+
+	var exit *smolvm.ExitError
+	if !errors.As(err, &exit) || exit.Code != 1 {
+		t.Fatalf("error = %v; want an ExitError with code 1", err)
+	}
+	if want := "smolvm machine stop --name m: exit 1\nError: vm not found: m"; err.Error() != want {
+		t.Errorf("error =\n%s\nwant\n%s", err, want)
+	}
+}
+
+func TestExecForwardsStdinAndOutput(t *testing.T) {
+	c, call := fake{stdout: "out", stderr: "err"}.start(t)
+	var stdout, stderr strings.Builder
+
+	err := c.Exec(t.Context(), "m", []string{"cat"},
+		smolvm.ExecOptions{Stdin: strings.NewReader("in"), Stdout: &stdout, Stderr: &stderr})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := call().Stdin; got != "in" {
+		t.Errorf("stdin = %q", got)
+	}
+	if stdout.String() != "out" || stderr.String() != "err" {
+		t.Errorf("stdout, stderr = %q, %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestExecReturnsTheExitCodeAndTheTailOfStderr(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 30; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	allStderr := strings.Join(lines, "\n") + "\n"
+	c, _ := fake{stderr: allStderr, exit: 3}.start(t)
+	var stderr strings.Builder
+
+	err := c.Exec(t.Context(), "m", []string{"false"}, smolvm.ExecOptions{Stderr: &stderr})
+
+	var exit *smolvm.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("error = %v; want an ExitError", err)
+	}
+	if exit.Code != 3 {
+		t.Errorf("Code = %d", exit.Code)
+	}
+	if want := strings.Join(lines[10:], "\n"); exit.Stderr != want {
+		t.Errorf("Stderr =\n%s\nwant\n%s", exit.Stderr, want)
+	}
+	if stderr.String() != allStderr {
+		t.Errorf("caller's stderr = %q", stderr.String())
+	}
+}
+
+func TestExecKeepsTheTailOfALongLine(t *testing.T) {
+	long := strings.Repeat("x", 100_000) + "end"
+	c, _ := fake{stderr: long, exit: 1}.start(t)
+
+	err := c.Exec(t.Context(), "m", []string{"false"}, smolvm.ExecOptions{})
+
+	var exit *smolvm.ExitError
+	if !errors.As(err, &exit) || !strings.HasSuffix(exit.Stderr, "xend") || len(exit.Stderr) > 10_000 {
+		t.Errorf("error = %.100v...", err)
+	}
+}
+
+func TestRunReturnsStdout(t *testing.T) {
+	c, _ := fake{stdout: "hello\n", stderr: "noise\n"}.start(t)
+
+	got, err := c.Run(t.Context(), "m", "echo hello")
+
+	if err != nil || got != "hello\n" {
+		t.Errorf("Run() = %q, %v", got, err)
+	}
+}
+
+func TestRunErrorsNameTheScriptsFirstLine(t *testing.T) {
+	c, _ := fake{stderr: "boom\n", exit: 2}.start(t)
+
+	_, err := c.Run(t.Context(), "m", "\n  kind create cluster\n  kubectl get nodes\n")
+
+	var exit *smolvm.ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("error = %v; want an ExitError with code 2", err)
+	}
+	if want := "kind create cluster: smolvm machine exec --name m --stream: exit 2\nboom"; err.Error() != want {
+		t.Errorf("error =\n%s\nwant\n%s", err, want)
+	}
+}
