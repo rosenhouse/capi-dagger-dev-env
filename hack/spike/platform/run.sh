@@ -102,6 +102,16 @@ resources() { # label machine-to-inspect
 		metric "host disk of $m ($1)" "$(du -sm "$(smolvm machine data-dir --name "$m")" | cut -f1) MiB"
 	done
 	guest "$2" resources "$1"
+	cpu_probe "$2" "$1"
+}
+
+# cpu_probe <machine> <label>: guest CPU use, and the guest clock against the host's.
+cpu_probe() {
+	local host guest
+	host=$(date +%s)
+	guest=$(smolvm machine exec --name "$1" -- date +%s)
+	metric "guest clock minus host clock ($2)" "$((guest - host)) s"
+	guest "$1" cpu-probe "$2"
 }
 
 branch() {
@@ -121,6 +131,7 @@ branch() {
 	monitor >"$OUT/monitor.log" 2>&1 &
 	metric "source state after branch" "$(smolvm machine status --name $SRC --json | jq -r .state)"
 	smolvm machine ls -v
+	cpu_probe $ENV "just after branch"
 }
 
 # vmm_stat <machine> prints the VMM's minor faults, major faults and CPU seconds.
@@ -160,7 +171,7 @@ kubectl_works() { # cluster local-port
 	"${k[@]}" -n kube-system exec "$etcd" -c etcd -- etcd --version
 	"${k[@]}" -n kube-system port-forward "pod/$dns" "$2:8080" >"$OUT/port-forward-$1.log" 2>&1 &
 	pf=$!
-	retry 30 curl -fsS "http://127.0.0.1:$2/health"
+	retry 120 curl -fsS "http://127.0.0.1:$2/health"
 	echo
 	kill $pf
 	metric "$1: kubectl logs, exec and port-forward from the host" ok
@@ -177,6 +188,7 @@ host_access() {
 	wait $work
 	metric "env VMM minor faults, major faults, CPU s from branch to both /readyz" \
 		"$(echo "$(cat "$OUT/env-stat-at-branch") $(vmm_stat $ENV)" | awk '{ printf "%d, %d, %.1f s", $4 - $1, $5 - $2, $6 - $3 }')"
+	cpu_probe $ENV "both /readyz answer"
 	kubeconfig /root/.kube/config $H_MGMT mgmt
 	kubeconfig /root/work.kubeconfig $H_WORK work
 	timed "mgmt kubectl checks from the host" kubectl_works mgmt 18181

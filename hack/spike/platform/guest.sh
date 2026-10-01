@@ -239,6 +239,27 @@ resources() {
 	metric "container restarts in mgmt, work ($1)" "$(restarts), $(restarts --kubeconfig /root/work.kubeconfig)"
 }
 
+# Samples guest CPU for 10 s: the split from /proc/stat, and the busiest processes.
+cpu_probe() {
+	head -1 /proc/stat >/tmp/stat0
+	cpu_ticks >/tmp/ticks0
+	sleep 10
+	head -1 /proc/stat >/tmp/stat1
+	cpu_ticks >/tmp/ticks1
+	metric "guest CPU user, system, irq, softirq, idle, steal ($1)" "$(cat /tmp/stat0 /tmp/stat1 | awk '
+		NR == 1 { for (i = 2; i <= 9; i++) a[i] = $i; next }
+		{ for (i = 2; i <= 9; i++) { d[i] = $i - a[i]; t += d[i] } }
+		END { printf "%d%%, %d%%, %d%%, %d%%, %d%%, %d%%", 100*d[2]/t, 100*d[4]/t, 100*d[7]/t, 100*d[8]/t, 100*d[5]/t, 100*d[9]/t }')"
+	metric "busiest guest processes, CPU s in 10 s ($1)" "$(awk 'NR == FNR { a[$1] = $2; next } ($1 in a) && $2 > a[$1] { print $2 - a[$1], $3 }' /tmp/ticks0 /tmp/ticks1 |
+		sort -rn | head -6 | awk '{ printf "%s%s %.1f", sep, $2, $1 / 100; sep = ", " }')"
+	dmesg | tail -5
+}
+
+cpu_ticks() { # pid utime+stime comm
+	cat /proc/[0-9]*/stat 2>/dev/null | sed 's/^\([0-9]*\) (\(.*\)) /\1 \2 /' |
+		awk '{ n = NF; print $1, $(n - 38) + $(n - 37), $2 }'
+}
+
 restarts() {
 	kubectl "$@" get pods -A --no-headers | awk '{ s += $5 } END { print s }'
 }
@@ -273,6 +294,7 @@ workload) workload ;;
 workload-wait) workload_wait ;;
 forward) forward ;;
 resources) resources "$2" ;;
+cpu-probe) cpu_probe "$2" ;;
 diag) diag ;;
 *) echo "unknown stage $1" >&2; exit 2 ;;
 esac
