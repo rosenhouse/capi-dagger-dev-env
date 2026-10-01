@@ -61,7 +61,19 @@ nodes:
     containerPath: /var/run/docker.sock
   - hostPath: %s
     containerPath: /etc/containerd/certs.d
-`, MgmtAPIPort, ContainerdCertsDir)
+  - hostPath: %s
+    containerPath: /etc/systemd/system/kubelet.service.d/05-devenv-cgroup.conf
+    readOnly: true
+`, MgmtAPIPort, ContainerdCertsDir, kubeletDropInPath)
+
+// kubeletDropInPath is where the Docker daemon's filesystem holds kubeletDropIn.
+const kubeletDropInPath = "/etc/devenv/kubelet-cgroup.conf"
+
+// kubeletDropIn runs before Kind's kubelet setup, which fails while any process is in the node's root cgroup.
+// kubeadm, which kind runs with docker exec, can land there, so this moves such processes to init.scope.
+const kubeletDropIn = `[Service]
+ExecStartPre=/bin/sh -c 'for p in $$(cat /sys/fs/cgroup/cgroup.procs); do [ "$$p" = 0 ] || echo "$$p" >>/sys/fs/cgroup/init.scope/cgroup.procs || :; done'
+`
 
 // Infra holds the long-lived services of one environment's Dagger session.
 type Infra struct {
@@ -87,13 +99,38 @@ func Preflight(ctx context.Context, c *dagger.Client) error {
 	if err != nil {
 		return err
 	}
-	return requireCgroupV2(magic)
+	if err := requireCgroupV2(magic); err != nil {
+		return err
+	}
+	// The limits can change between sessions, so the reading must not come from the cache.
+	limits, err := c.Container().From(dindImage).
+		With(InSession).
+		WithExec([]string{"cat", "/proc/sys/fs/inotify/max_user_instances", "/proc/sys/fs/inotify/max_user_watches"}).
+		Stdout(ctx)
+	if err != nil {
+		return err
+	}
+	return requireInotify(limits)
 }
 
 // requireCgroupV2 checks the filesystem magic number of /sys/fs/cgroup, which BusyBox and GNU stat both print.
 func requireCgroupV2(magic string) error {
 	if magic = strings.TrimSpace(magic); magic != "63677270" {
 		return fmt.Errorf("the Dagger engine's host does not mount cgroup2 at /sys/fs/cgroup (filesystem magic 0x%s); Kind inside Dagger needs cgroup v2", magic)
+	}
+	return nil
+}
+
+// requireInotify fails if the inotify limits, max_user_instances then max_user_watches, are below the README's prerequisites.
+// Below them, a Kind node's kubelet can fail to start.
+func requireInotify(limits string) error {
+	var instances, watches int
+	if _, err := fmt.Sscan(limits, &instances, &watches); err != nil {
+		return fmt.Errorf("read inotify limits %q: %w", limits, err)
+	}
+	if instances < 512 || watches < 524288 {
+		return fmt.Errorf("the Dagger engine's host allows %d inotify instances and %d watches per user; Kind inside Dagger needs at least 512 inotify instances and 524288 watches. "+
+			"On that host, or your container runtime's VM, run: sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288", instances, watches)
 	}
 	return nil
 }
@@ -109,7 +146,8 @@ func Start(ctx context.Context, c *dagger.Client, envID, registryHost string, mi
 
 	daemon := c.Container().From(dindImage).
 		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
-		WithNewFile(ContainerdCertsDir+"/"+registryHost+"/hosts.toml", hostsTOML("http://"+registryHost, registryHost))
+		WithNewFile(ContainerdCertsDir+"/"+registryHost+"/hosts.toml", hostsTOML("http://"+registryHost, registryHost)).
+		WithNewFile(kubeletDropInPath, kubeletDropIn)
 	for name, mirror := range mirrors {
 		daemon = daemon.WithNewFile(ContainerdCertsDir+"/"+name+"/hosts.toml", hostsTOML(Upstreams[name], mirror.Host))
 	}
@@ -143,11 +181,17 @@ func Start(ctx context.Context, c *dagger.Client, envID, registryHost string, mi
 	return i, err
 }
 
+// managementClusterScript creates the management cluster and prints its kubeconfig.
+// A failed cluster keeps its node, so ExportLogs can collect the node's logs.
+func managementClusterScript() string {
+	return fmt.Sprintf("set -e\nkind create cluster --name mgmt --retain --image %s --config - <<'EOF'\n%sEOF\nkind get kubeconfig --name mgmt",
+		kindNodeImage, mgmtKindConfig)
+}
+
 // CreateManagementCluster creates the Kind management cluster and returns its kubeconfig.
 // Later Run calls use the cluster as kubectl's default.
 func (i *Infra) CreateManagementCluster(ctx context.Context) ([]byte, error) {
-	out, err := i.Run(ctx, nil, fmt.Sprintf("kind create cluster --name mgmt --image %s --config - <<'EOF'\n%sEOF\nkind get kubeconfig --name mgmt",
-		kindNodeImage, mgmtKindConfig))
+	out, err := i.Run(ctx, nil, managementClusterScript())
 	if err != nil {
 		return nil, err
 	}
