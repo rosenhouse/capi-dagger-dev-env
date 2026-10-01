@@ -35,11 +35,11 @@ timed() { # name command...
 	metric "$name" "$(since "$t0")"
 }
 
-# guest <machine> <guest.sh stage> [arg]: runs a platform guest.sh stage and records its metric lines.
+# guest <machine> <guest.sh stage> [arg]: runs a stage of this directory's guest.sh and records its metric lines.
 guest() {
 	local log rc=0
 	log=$OUT/guest-$1-$2-$(date +%s%N).log
-	smolvm machine exec --name "$1" --stream --timeout 30m -- sh /root/guest.sh "${@:2}" | tee "$log" || rc=$?
+	smolvm machine exec --name "$1" --stream --timeout 30m -- sh /root/restore-guest.sh "${@:2}" | tee "$log" || rc=$?
 	sed -n 's/^metric|\(.*\)|\(.*\)$/| \1 | \2 |/p' "$log" >>"$METRICS"
 	return "$rc"
 }
@@ -65,6 +65,7 @@ resources() { # label
 }
 
 observe() {
+	smolvm machine cp guest.sh plat:/root/restore-guest.sh
 	smolvm machine cp sampler-guest.sh plat:/root/sampler-guest.sh
 	smolvm machine exec --name plat -d -- sh /root/sampler-guest.sh
 	started plat
@@ -74,13 +75,32 @@ observe() {
 	resources "plat steady"
 }
 
+host_avail() { free -m | awk '/^Mem:/ { print $7 }'; }
+guest_avail() { smolvm machine exec --name plat -- awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo; }
+
+# zero_fill drops plat's page cache, then writes zeros into guest tmpfs in 512 MiB steps, so that
+# stale pages become zero pages, which capture skips. A step can grow plat's memfd by 512 MiB, so
+# it stops while the host still has 4 GiB available.
+zero_fill() {
+	local i=0 t0
+	smolvm machine exec --name plat -- sh -c 'sync; echo 3 >/proc/sys/vm/drop_caches; mkdir -p /mnt/zero; mount -t tmpfs -o size=100% zero /mnt/zero'
+	t0=$(now)
+	while (($(host_avail) > 4096 && $(guest_avail) > 2048)); do
+		smolvm machine exec --name plat -- dd if=/dev/zero of=/mnt/zero/$i bs=1M count=512
+		i=$((i + 1))
+	done
+	metric "zero-filled guest memory" "$((i * 512)) MiB in $(since "$t0")"
+	metric "host, guest MemAvailable when the zero fill stopped" "$(host_avail) MiB, $(guest_avail) MiB"
+	smolvm machine exec --name plat -- sh -c 'rm -f /mnt/zero/*; umount /mnt/zero'
+}
+
 # capture <zero-fill|none>
 capture() {
 	local log=$OUT/capture.log used t0
 	guest plat pre-capture
 	if [ "$1" = zero-fill ]; then
 		phase zero-fill plat
-		guest plat zero-fill
+		zero_fill
 		resources "plat zero-filled"
 	fi
 	used=$(df -m --output=used / | tail -1)
