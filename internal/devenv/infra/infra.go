@@ -1,4 +1,4 @@
-// Package infra runs an environment's smolvm VM: its Docker daemon, session registry and Kind clusters.
+// Package infra runs an environment's smolvm VM: its Docker daemon, registry and Kind clusters.
 package infra
 
 import (
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -26,16 +27,18 @@ const (
 	WorkloadAPIPort    = 7443
 	RegistryPort       = 5000
 	ContainerdCertsDir = "/etc/devenv/certs.d"
-	// Registry is the session registry's address on the kind network, where the clusters pull first-party images.
+	// Registry is the address on the kind network where the clusters pull first-party images.
 	// It is a private IP, so clients use plain HTTP.
 	Registry   = registryIP + ":5000"
 	registryIP = "172.31.255.254"
 
-	// Digests avoid a registry round trip, and its rate limit, when the image is cached.
+	// Each new VM pulls these images, since nothing caches images across VMs yet.
 	registryImage  = "registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
 	socatImage     = "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
 	kindNodeDigest = "sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
 	kindNodeImage  = "kindest/node:" + KubernetesVersion + "@" + kindNodeDigest
+	// capdLoadBalancerImage is CAPD's default load balancer image, which CAPD pulls by tag.
+	capdLoadBalancerImage = "kindest/haproxy:v20230606-42a2262b"
 )
 
 // machineConfig sizes each environment's VM. Two fit on a 16 GB host.
@@ -60,7 +63,7 @@ func (v *VM) Create(ctx context.Context, ports state.Ports) error {
 	if err := v.CLI.Create(ctx, v.Name, cfg); err != nil {
 		return err
 	}
-	return v.CLI.Start(ctx, v.Name, smolvm.StartOptions{})
+	return v.CLI.Start(ctx, v.Name, smolvm.StartOptions{NoIdleReclaim: true})
 }
 
 func (v *VM) Delete(ctx context.Context) error {
@@ -116,7 +119,8 @@ func (v *VM) Copy(ctx context.Context, cache fetch.Cache, downloads []Download) 
 
 const alpine = "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/"
 
-// tools are the guest's tools. Their URLs take the architecture as Go names it (%[1]s), or as Docker and Alpine do (%[2]s).
+// tools are the binaries and packages that the guest needs.
+// Their URLs take the architecture as Go names it (%[1]s), or as Docker and Alpine do (%[2]s).
 // The guest runs Alpine 3.19, which lacks iptables for Docker.
 var tools = []struct {
 	url, path string
@@ -198,28 +202,44 @@ rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid`); err != ni
 		return err
 	}
 	return ready.Wait(ctx, ready.Gate{
-		Name: "dockerd answers", Timeout: time.Minute, Interval: time.Second,
+		Name: "dockerd answers", Timeout: time.Minute, Interval: time.Second, Log: v.Log,
 		Check: func(ctx context.Context) error { return v.Run(ctx, "docker info >/dev/null") },
 	})
 }
 
-// StartRegistry creates the kind network and runs the session registry on it at Registry, published on RegistryPort.
+// StartRegistry creates the kind network and runs the environment's registry on it at Registry, published on RegistryPort.
 // The network's dynamic range leaves out Registry's address. Containerd in every node pulls from it over plain HTTP.
 func (v *VM) StartRegistry(ctx context.Context) error {
 	return v.Run(ctx, fmt.Sprintf(`docker network create -d bridge -o com.docker.network.bridge.enable_ip_masquerade=true \
   -o com.docker.network.driver.mtu=1500 --subnet 172.31.0.0/16 --ip-range 172.31.0.0/17 kind >/dev/null
-docker run -d --name devenv-registry --restart=always --network kind --ip %[1]s -p %[2]d:5000 %[3]s >/dev/null
+docker run -d --name devenv-registry --network kind --ip %[1]s -p %[2]d:5000 %[3]s >/dev/null
 mkdir -p %[4]s/%[5]s
 cat >%[4]s/%[5]s/hosts.toml <<'EOF'
-%[6]sEOF`, registryIP, RegistryPort, registryImage, ContainerdCertsDir, Registry, hostsTOML("http://"+Registry, Registry)))
+%[6]sEOF`, registryIP, RegistryPort, registryImage, ContainerdCertsDir, Registry, hostsTOML(Registry)))
 }
 
-// hostsTOML renders containerd registry config that tries mirror, then falls back to server.
-func hostsTOML(server, mirror string) string {
-	return fmt.Sprintf("server = %q\n\n[host.%q]\n  capabilities = [\"pull\", \"resolve\"]\n", server, "http://"+mirror)
+// hostsTOML renders containerd config that pulls from registry over plain HTTP.
+func hostsTOML(registry string) string {
+	return fmt.Sprintf("server = %[1]q\n\n[host.%[1]q]\n  capabilities = [\"pull\", \"resolve\"]\n", "http://"+registry)
 }
 
-// The node mounts the Docker socket for CAPD, and containerd config for the session registry.
+// PullImages pulls the images that the guest runs, retrying a pull that fails or stalls.
+func (v *VM) PullImages(ctx context.Context) error {
+	return v.Run(ctx, `pull() {
+  for i in 1 2 3; do timeout 300 docker pull -q "$1" >/dev/null && return; sleep 5; done
+  echo "could not pull $1" >&2
+  return 1
+}
+pids=""
+for image in `+strings.Join([]string{kindNodeImage, registryImage, socatImage, capdLoadBalancerImage}, " ")+`; do
+  pull "$image" & pids="$pids $!"
+done
+status=0
+for pid in $pids; do wait "$pid" || status=1; done
+exit $status`)
+}
+
+// The node mounts the Docker socket for CAPD, and containerd config for the environment's registry.
 var mgmtKindConfig = fmt.Sprintf(`kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
@@ -238,7 +258,8 @@ nodes:
 // Later guest commands use the cluster as kubectl's default.
 // CAPD's nodes ask for the node image by tag, so tagging the pinned image saves them a pull.
 func (v *VM) CreateManagementCluster(ctx context.Context) ([]byte, error) {
-	if err := v.Run(ctx, fmt.Sprintf("kind create cluster --name mgmt --image %s --config - <<'EOF'\n%sEOF\ndocker tag kindest/node@%s kindest/node:%s",
+	// --retain keeps the node of a failed create for ExportLogs.
+	if err := v.Run(ctx, fmt.Sprintf("kind create cluster --retain --name mgmt --image %s --config - <<'EOF'\n%sEOF\ndocker tag kindest/node@%s kindest/node:%s",
 		kindNodeImage, mgmtKindConfig, kindNodeDigest, KubernetesVersion)); err != nil {
 		return nil, err
 	}

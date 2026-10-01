@@ -61,6 +61,9 @@ func fakeSmolvmMain(dir string, args []string) int {
 		machines = append(machines, smolvm.Machine{Name: name, State: smolvm.Created})
 	case strings.HasPrefix(call, "machine start "):
 		machines[slices.IndexFunc(machines, named)].State = smolvm.Running
+		if err := os.WriteFile(filepath.Join(dir, "idle-reclaim"), []byte(os.Getenv("SMOLVM_IDLE_RECLAIM")), 0o600); err != nil {
+			panic(err)
+		}
 	case strings.HasPrefix(call, "machine delete "):
 		machines = slices.DeleteFunc(machines, named)
 	}
@@ -120,6 +123,7 @@ func fakeSmolvm(t *testing.T, machines func(state.Env) []smolvm.Machine) fake {
 	writeMachines(f.dir, machines(f.env))
 	t.Setenv("FAKE_SMOLVM_DIR", f.dir)
 	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm "+smolvm.Version)
+	t.Setenv("SMOLVM_IDLE_RECLAIM", "")
 	return f
 }
 
@@ -446,6 +450,9 @@ func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 		if !strings.Contains(got[1], publish) {
 			t.Errorf("%q does not publish %q", got[1], publish)
 		}
+	}
+	if reclaim, err := os.ReadFile(filepath.Join(f.dir, "idle-reclaim")); string(reclaim) != "off" {
+		t.Errorf("SMOLVM_IDLE_RECLAIM = %q, %v; want off", reclaim, err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()

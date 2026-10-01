@@ -74,9 +74,11 @@ func Downloads() []infra.Download {
 	return downloads
 }
 
+// InstallKappController installs kapp-controller and waits for its Deployment and its aggregated Package API.
 func InstallKappController(ctx context.Context, vm *infra.VM) error {
-	return vm.Run(ctx, "kubectl apply --server-side -f "+kappControllerManifest+
-		" >/dev/null\nkubectl -n kapp-controller rollout status deployment/kapp-controller --timeout=5m")
+	return vm.Run(ctx, "kubectl apply --server-side -f "+kappControllerManifest+` >/dev/null
+kubectl -n kapp-controller rollout status deployment/kapp-controller --timeout=5m
+kubectl wait --for=condition=Available apiservice/v1alpha1.data.packaging.carvel.dev --timeout=2m`)
 }
 
 // InstallClusterAPI installs CAPI core, the kubeadm providers and CAPD, and waits for them.

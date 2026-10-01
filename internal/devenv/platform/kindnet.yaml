@@ -1,5 +1,5 @@
-# Source: sigs.k8s.io/cluster-api/test@v1.14.2 e2e/data/cni/kindnet/kindnet.yaml (Apache-2.0).
-# source: https://github.com/kubernetes-sigs/kind/blob/v0.27.0/pkg/build/nodeimage/const_cni.go#L28
+# Source: sigs.k8s.io/kind@v0.33.0 pkg/build/nodeimage/const_cni.go (Apache-2.0), whose kindnetd image
+# kindest/node v1.37.0 preloads. POD_SUBNET holds the placeholder of CAPI's e2e copy, which devenv replaces.
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -75,11 +75,11 @@ spec:
         kubernetes.io/os: linux
       tolerations:
       - operator: Exists
+      priorityClassName: system-node-critical
       serviceAccountName: kindnet
       containers:
       - name: kindnet-cni
-        # Needs to be kept in sync with DOCKER_PRELOAD_IMAGES in test/e2e/config/docker.yaml for caching purposes.
-        image: kindest/kindnetd:v20250214-acbabc1a
+        image: docker.io/kindest/kindnetd:v20260820-69b56db7
         env:
         - name: HOST_IP
           valueFrom:
@@ -89,8 +89,6 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
-        # We're using the dualstack CIDRs here. The order doesn't matter for kindnet as the loops are run concurrently.
-        # REF: https://github.com/kubernetes-sigs/kind/blob/3dbeb894e3092a336ab4278d3823e73a1d66aff7/images/kindnetd/cmd/kindnetd/main.go#L149-L175
         - name: POD_SUBNET
           value: '${DOCKER_POD_CIDRS},${DOCKER_POD_IPV6_CIDRS}'
         volumeMounts:
@@ -102,11 +100,10 @@ spec:
         - name: lib-modules
           mountPath: /lib/modules
           readOnly: true
+        - name: nri-plugin
+          mountPath: /var/run/nri
         resources:
           requests:
-            cpu: "100m"
-            memory: "50Mi"
-          limits:
             cpu: "100m"
             memory: "50Mi"
         securityContext:
@@ -114,13 +111,16 @@ spec:
           capabilities:
             add: ["NET_RAW", "NET_ADMIN"]
       volumes:
-        - name: cni-cfg
-          hostPath:
-            path: /etc/cni/net.d
-        - name: xtables-lock
-          hostPath:
-            path: /run/xtables.lock
-            type: FileOrCreate
-        - name: lib-modules
-          hostPath:
-            path: /lib/modules
+      - name: cni-cfg
+        hostPath:
+          path: /etc/cni/net.d
+      - name: xtables-lock
+        hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+      - name: nri-plugin
+        hostPath:
+          path: /var/run/nri
