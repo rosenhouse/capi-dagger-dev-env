@@ -204,11 +204,14 @@ func (e *Environment) restoredGates(ctx context.Context, restored time.Time) err
 	return e.platformGates(ctx)
 }
 
+// kubeClient is a variable so that tests can stand in for a cluster's API.
+var kubeClient = kube.Client
+
 func (e *Environment) leasesGate(cluster, kubeconfig string, since time.Time, leases []kube.Leases) ready.Gate {
 	return ready.Gate{
 		Name: cluster + " leases renewed since the restore", Timeout: warmGatesTimeout, Interval: 2 * time.Second, Attempt: apiAttempt,
 		Check: func(ctx context.Context) error {
-			cs, err := kube.Client(kubeconfig)
+			cs, err := kubeClient(kubeconfig)
 			if err != nil {
 				return err
 			}

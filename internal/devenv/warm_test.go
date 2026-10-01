@@ -18,8 +18,15 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
@@ -713,5 +720,57 @@ func writeCheckpoint(t *testing.T, path string, ports ...smolvm.Port) {
 	}
 	if err := os.WriteFile(path, slices.Concat(manifest, footer), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRestoredGatesWaitForEveryLeaseToBeRenewedAfterTheRestore(t *testing.T) {
+	restored := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	fresh := restored.Add(time.Second)
+	leases := func(renewed map[string]time.Time) []runtime.Object {
+		var objs []runtime.Object
+		for _, l := range []struct{ namespace, name string }{
+			{"kube-node-lease", "node"}, {"kube-system", "kube-controller-manager"}, {"kube-system", "kube-scheduler"},
+			{"capi-system", "capi"}, {"capi-kubeadm-bootstrap-system", "bootstrap"},
+			{"capi-kubeadm-control-plane-system", "control-plane"}, {"capd-system", "capd"},
+		} {
+			at, ok := renewed[l.namespace]
+			if !ok {
+				at = fresh
+			}
+			objs = append(objs, &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Namespace: l.namespace, Name: l.name},
+				Spec:       coordinationv1.LeaseSpec{HolderIdentity: ptr.To("holder"), RenewTime: &metav1.MicroTime{Time: at}},
+			})
+		}
+		return objs
+	}
+	for _, tc := range []struct {
+		name    string
+		renewed map[string]time.Time
+		stale   string
+	}{
+		{"a node lease from the capture", map[string]time.Time{"kube-node-lease": restored.Add(-time.Hour)}, "kube-node-lease/node"},
+		{"a CAPD lease from the capture", map[string]time.Time{"capd-system": restored.Add(-time.Hour)}, "capd-system/capd"},
+		{"a lease renewed 3 s before the restore", map[string]time.Time{"kube-node-lease": restored.Add(-3 * time.Second)}, "kube-node-lease/node"},
+		{"every lease renewed after the restore", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := fakeSmolvm(t, vm("")).open(t)
+			cs := kubefake.NewClientset(leases(tc.renewed)...)
+			kubeClient = func(string) (kubernetes.Interface, error) { return cs, nil }
+			t.Cleanup(func() { kubeClient = kube.Client })
+			warmGatesTimeout = 300 * time.Millisecond
+			t.Cleanup(func() { warmGatesTimeout = 2 * time.Minute })
+
+			err := e.restoredGates(t.Context(), restored)
+
+			leasesStale := err != nil && strings.Contains(err.Error(), "leases not renewed since")
+			if tc.stale == "" && leasesStale {
+				t.Errorf("err = %v; want the lease gates to pass", err)
+			}
+			if tc.stale != "" && (!leasesStale || !strings.Contains(err.Error(), tc.stale)) {
+				t.Errorf("err = %v; want it to name %s", err, tc.stale)
+			}
+		})
 	}
 }

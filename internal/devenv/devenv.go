@@ -19,6 +19,7 @@ import (
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
@@ -262,8 +263,8 @@ func (e *Environment) fail(ctx context.Context, err error) error {
 
 // The workload Cluster's name and namespace in the management cluster.
 const (
-	WorkloadCluster   = "work"
-	WorkloadNamespace = "default"
+	WorkloadCluster   = platform.WorkloadCluster
+	WorkloadNamespace = platform.WorkloadNamespace
 	// remotePackageInstall is the name addon-manager gives greeting-controller's PackageInstall.
 	remotePackageInstall = WorkloadCluster + "-greeting-controller"
 )
