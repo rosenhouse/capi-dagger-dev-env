@@ -81,8 +81,22 @@ func TestBaseSharesTheCacheBetweenConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestBaseRejectsAnImageForAnotherPlatform(t *testing.T) {
+	_, ref, want := multiPlatformBase(t)
+	repo, _, _ := strings.Cut(ref, "@")
+	amd64Image := repo + "@" + want[amd64.String()].String()
+	cache := t.TempDir()
+
+	if _, err := oci.Base(context.Background(), amd64Image, amd64, cache); err != nil {
+		t.Errorf("amd64 image for amd64: %v", err)
+	}
+	if _, err := oci.Base(context.Background(), amd64Image, arm64, cache); err == nil {
+		t.Error("amd64 image for arm64: no error")
+	}
+}
+
 func TestBaseRejectsACacheEntryWithSeveralImages(t *testing.T) {
-	_, ref, _ := multiPlatformBase(t)
+	srv, ref, _ := multiPlatformBase(t)
 	cache := t.TempDir()
 	base(t, ref, arm64, cache)
 	entries, err := os.ReadDir(cache)
@@ -96,9 +110,12 @@ func TestBaseRejectsACacheEntryWithSeveralImages(t *testing.T) {
 	if err := p.AppendImage(empty.Image); err != nil {
 		t.Fatal(err)
 	}
+	srv.Close()
 
-	if _, err := oci.Base(context.Background(), ref, arm64, cache); err == nil {
-		t.Error("no error")
+	_, err = oci.Base(context.Background(), ref, arm64, cache)
+
+	if err == nil || !strings.Contains(err.Error(), entries[0].Name()) {
+		t.Errorf("err = %v, want one naming the cache entry", err)
 	}
 }
 
@@ -279,6 +296,14 @@ func multiPlatformBase(t *testing.T) (*httptest.Server, string, map[string]v1.Ha
 	for _, p := range []v1.Platform{amd64, arm64} {
 		img, err := random.Image(1024, 2)
 		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := img.ConfigFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.OS, cfg.Architecture = p.OS, p.Architecture
+		if img, err = mutate.ConfigFile(img, cfg); err != nil {
 			t.Fatal(err)
 		}
 		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{Add: img, Descriptor: v1.Descriptor{Platform: &p}})
