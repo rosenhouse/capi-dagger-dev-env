@@ -33,3 +33,9 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - demo.example.com
+  resources:
+  - greetings/finalizers
+  verbs:
+  - update

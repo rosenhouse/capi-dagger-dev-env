@@ -8,7 +8,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
-//go:generate go tool controller-gen object crd paths=./... output:crd:dir=../../config/crd
+//go:generate go tool controller-gen object paths=./...
+//go:generate go tool controller-gen crd paths=./... output:crd:dir=../../config/greeting-syncer
+//go:generate go tool controller-gen crd paths=./... output:crd:dir=../../config/greeting-controller
 
 var (
 	GroupVersion  = schema.GroupVersion{Group: "demo.example.com", Version: "v1alpha1"}

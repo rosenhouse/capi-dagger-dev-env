@@ -94,9 +94,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-tool (
-	k8s.io/api
-	k8s.io/apimachinery
-	k8s.io/client-go
-	sigs.k8s.io/controller-tools/cmd/controller-gen
-)
+tool sigs.k8s.io/controller-tools/cmd/controller-gen

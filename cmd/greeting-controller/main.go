@@ -23,6 +23,10 @@ func main() {
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 	log := ctrl.Log.WithName("greeting-controller")
+	if r.HelloImage == "" || r.ProxyImage == "" {
+		log.Error(nil, "hello and proxy images are required")
+		os.Exit(1)
+	}
 
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

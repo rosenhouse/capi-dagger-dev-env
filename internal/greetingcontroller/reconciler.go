@@ -20,6 +20,7 @@ import (
 //go:generate go tool controller-gen rbac:roleName=greeting-controller paths=./... output:rbac:dir=../../config/greeting-controller
 
 // +kubebuilder:rbac:groups=demo.example.com,resources=greetings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=demo.example.com,resources=greetings/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch;create;update
 

@@ -27,6 +27,9 @@ kind: ConfigMap
 metadata:
   name: workload-images
   namespace: greeting-controller
+  annotations:
+    # A new image creates a new ConfigMap version, which rolls the Deployment.
+    kapp.k14s.io/versioned: ""
 data:
   helloImage: hello
   proxyImage: docker.io/library/nginx:1.29-alpine
