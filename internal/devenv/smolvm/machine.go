@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"strconv"
 	"strings"
 	"time"
@@ -181,15 +182,36 @@ func execArgs(name string, env []string) []string {
 	return args
 }
 
-// Run runs script with "sh -euo pipefail -c" in a running machine and returns its stdout.
-// Its errors start with the script's first line.
-func (c CLI) Run(ctx context.Context, name, script string) (string, error) {
+// Run runs script with "sh -euo pipefail -c" in a running machine and returns its stdout,
+// which opts.Stdout also receives if set. Its errors start with the script's first line.
+func (c CLI) Run(ctx context.Context, name, script string, opts ExecOptions) (string, error) {
 	var stdout strings.Builder
-	if err := c.Exec(ctx, name, []string{"sh", "-euo", "pipefail", "-c", script}, ExecOptions{Stdout: &stdout}); err != nil {
+	if opts.Stdout != nil {
+		opts.Stdout = io.MultiWriter(&stdout, opts.Stdout)
+	} else {
+		opts.Stdout = &stdout
+	}
+	if err := c.Exec(ctx, name, []string{"sh", "-euo", "pipefail", "-c", script}, opts); err != nil {
 		first, _, _ := strings.Cut(strings.TrimSpace(script), "\n")
 		return "", fmt.Errorf("%s: %w", first, err)
 	}
 	return stdout.String(), nil
+}
+
+// CopyIn copies the host file src to dst in a running machine, creating dst's parents.
+func (c CLI) CopyIn(ctx context.Context, name, src, dst string, mode fs.FileMode) error {
+	if strings.Contains(src, ":") {
+		return fmt.Errorf("smolvm cannot copy %s: its path has a colon", src)
+	}
+	return c.do(ctx, "machine", "cp", "--mode", strconv.FormatUint(uint64(mode.Perm()), 8), src, name+":"+dst)
+}
+
+// CopyOut copies the file src in a running machine to dst on the host.
+func (c CLI) CopyOut(ctx context.Context, name, src, dst string) error {
+	if strings.Contains(dst, ":") {
+		return fmt.Errorf("smolvm cannot copy to %s: its path has a colon", dst)
+	}
+	return c.do(ctx, "machine", "cp", name+":"+src, dst)
 }
 
 func (c CLI) do(ctx context.Context, args ...string) error {

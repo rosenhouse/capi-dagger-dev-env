@@ -221,10 +221,22 @@ func TestCommandLines(t *testing.T) {
 	}, {
 		"run",
 		func(ctx context.Context, c smolvm.CLI) error {
-			_, err := c.Run(ctx, "m", "echo hi\nexit 0")
+			_, err := c.Run(ctx, "m", "echo hi\nexit 0", smolvm.ExecOptions{Env: []string{"A=1"}})
 			return err
 		},
-		[]string{"machine", "exec", "--name", "m", "--stream", "--", "sh", "-euo", "pipefail", "-c", "echo hi\nexit 0"},
+		[]string{"machine", "exec", "--name", "m", "-e", "A=1", "--stream", "--", "sh", "-euo", "pipefail", "-c", "echo hi\nexit 0"},
+	}, {
+		"copy in",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.CopyIn(ctx, "m", "/h/kind", "/usr/local/bin/kind", 0o755)
+		},
+		[]string{"machine", "cp", "--mode", "755", "/h/kind", "m:/usr/local/bin/kind"},
+	}, {
+		"copy out",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.CopyOut(ctx, "m", "/tmp/logs.tgz", "/h/logs.tgz")
+		},
+		[]string{"machine", "cp", "m:/tmp/logs.tgz", "/h/logs.tgz"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, call := fake{}.start(t)
@@ -468,20 +480,27 @@ func (c cancelOnWrite) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestRunReturnsStdout(t *testing.T) {
-	c, _ := fake{stdout: "hello\n", stderr: "noise\n"}.start(t)
+func TestRunReturnsStdoutAndCopiesTheOutput(t *testing.T) {
+	c, call := fake{stdout: "hello\n", stderr: "noise\n"}.start(t)
+	var stdout, stderr strings.Builder
 
-	got, err := c.Run(t.Context(), "m", "echo hello")
+	got, err := c.Run(t.Context(), "m", "cat", smolvm.ExecOptions{Stdin: strings.NewReader("in"), Stdout: &stdout, Stderr: &stderr})
 
 	if err != nil || got != "hello\n" {
 		t.Errorf("Run() = %q, %v", got, err)
+	}
+	if stdout.String() != "hello\n" || stderr.String() != "noise\n" {
+		t.Errorf("stdout, stderr = %q, %q", stdout.String(), stderr.String())
+	}
+	if call().Stdin != "in" {
+		t.Errorf("stdin = %q", call().Stdin)
 	}
 }
 
 func TestRunErrorsNameTheScriptsFirstLine(t *testing.T) {
 	c, _ := fake{stderr: "boom\n", exit: 2}.start(t)
 
-	_, err := c.Run(t.Context(), "m", "\n  kind create cluster\n  kubectl get nodes\n")
+	_, err := c.Run(t.Context(), "m", "\n  kind create cluster\n  kubectl get nodes\n", smolvm.ExecOptions{})
 
 	var exit *smolvm.ExitError
 	if !errors.As(err, &exit) || exit.Code != 2 {
@@ -489,5 +508,18 @@ func TestRunErrorsNameTheScriptsFirstLine(t *testing.T) {
 	}
 	if want := "kind create cluster: smolvm machine exec --name m --stream -- sh: exit 2\nboom"; err.Error() != want {
 		t.Errorf("error =\n%s\nwant\n%s", err, want)
+	}
+}
+
+func TestCopyRefusesHostPathsWithAColon(t *testing.T) {
+	c, _ := fake{}.start(t)
+
+	for _, err := range []error{
+		c.CopyIn(t.Context(), "m", "/h/a:b", "/a", 0o644),
+		c.CopyOut(t.Context(), "m", "/a", "/h/a:b"),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "colon") {
+			t.Errorf("err = %v", err)
+		}
 	}
 }
