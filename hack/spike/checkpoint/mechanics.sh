@@ -4,15 +4,13 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 ckpt=$RUNNER_TEMP/tiny.checkpoint
 
-# clock NAME: prints "host_epoch guest_epoch guest_uptime".
-clock() { echo "$(date +%s.%N) $(guest "$1" 'date +%s; cut -d" " -f1 /proc/uptime' | tr '\n' ' ')"; }
-diff_s() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f s", b - a }'; }
-rss() { local pid; pid=$(smolvm machine status --name "$1" --json | jq -r .pid); grep -E '^(Rss|Pss_Shmem):' "/proc/$pid/smaps_rollup" | tr -s ' \n' ' '; }
+# Branch VMMs are not dumpable, so their /proc files need root.
+rss() { local pid; pid=$(smolvm machine status --name "$1" --json | jq -r .pid); sudo grep -E '^(Rss|Pss_Shmem):' "/proc/$pid/smaps_rollup" | tr -s ' \n' ' '; }
 state() { smolvm machine status --name "$1" --json | jq -r .state; }
 outcome() { local out rc=0; out=$("$@" 2>&1) || rc=$?; echo "exit $rc: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; }
 listening() { ss -ltnH | awk '{ print $4 }' | grep -oE ':(1808[0-9]|28080)$' | sort | tr '\n' ' '; }
 
-summary "## E1 on $(cpu_model), kernel $(uname -r), image ${ImageVersion:-?}"
+summary "## E1 on $(cpu_model), $(host_info)"
 summary "| measurement | value |"
 summary "|---|---|"
 
@@ -39,6 +37,8 @@ measure "guest uptime advance over the same span" "$(diff_s "$u0" "$u1")"
 measure "guest realtime minus host realtime, before capture" "$(diff_s "$h0" "$g0")"
 measure "guest realtime minus host realtime, after restore" "$(diff_s "$h1" "$g1")"
 measure "tiny: VMM after restore" "$(rss tiny)"
+measure "tiny: guest clocksource" "$(guest tiny 'cat /sys/devices/system/clocksource/clocksource0/current_clocksource')"
+guest tiny 'dmesg | tail -15'
 echo "::endgroup::"
 
 echo "::group::C2 two branches with pinned ports"
@@ -71,6 +71,7 @@ measure "tiny-u: update --remove-port 18080:8080 -p 28080:8080 while Created" \
 smolvm machine ls --verbose
 timed "tiny-u: start (restore)" smolvm machine start --name tiny-u
 measure "tiny-u: served on 28080" "$(probe 28080)"
+measure "tiny-u: hostname" "$(guest tiny-u hostname)"
 measure "host ports listening" "$(listening)"
 echo "::endgroup::"
 

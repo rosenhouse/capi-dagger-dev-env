@@ -9,12 +9,14 @@ summary "| measurement | value |"
 summary "|---|---|"
 boot_tiny tiny 18080
 wait_serving 18080
+read -r h _ u < <(clock tiny)
+echo "$h $u" >"$out/clock.txt"
 checkpoint tiny "$out/tiny.checkpoint"
 smolvm machine delete --name tiny -f
 
 cpu_model >"$out/model.txt"
 file_contract "$out/tiny.checkpoint" >"$out/contract.txt"
-echo "image ${ImageVersion:-?}, kernel $(uname -r), $(grep -m1 microcode /proc/cpuinfo | tr -d '\t')" >"$out/host.txt"
+host_info >"$out/host.txt"
 grep -m1 '^flags' /proc/cpuinfo >"$out/flags.txt"
 measure "CPU" "$(cat "$out/model.txt")"
 measure "host" "$(cat "$out/host.txt")"

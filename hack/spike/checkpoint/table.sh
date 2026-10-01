@@ -24,6 +24,11 @@ awk -F'\t' '{ print $1 "\t" $2; print $3 "\t" $4 }' <<<"$rows" | sort -u | short
   while IFS=$'\t' read -r m c; do summary "- $m ($c)"; done
 
 summary ""
+summary "### Guest clock after successful restores"
+awk -F'\t' '$6 == "ok" { print $1 " → " $3 ": " $10 }' <<<"$rows" | sort |
+  while read -r line; do summary "- $line"; done
+
+summary ""
 summary "### Timings of successful restores"
 awk -F'\t' '$6 == "ok" { n++; c += $7; s += $8; if ($7 > cm) cm = $7; if ($8 > sm) sm = $8 }
   END { if (n) printf "create --from mean %.2f s, max %.2f s; start mean %.2f s, max %.2f s; n=%d\n", c/n, cm, s/n, sm, n }' <<<"$rows" |
