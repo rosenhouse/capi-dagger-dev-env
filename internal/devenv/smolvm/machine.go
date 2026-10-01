@@ -55,14 +55,22 @@ type StartOptions struct {
 }
 
 // Start boots a machine, or resumes a machine created from a checkpoint.
-// A cancelled Start can leave the machine running, so the caller should delete it.
+// Once smolvm has begun, Start lets it finish and only then returns ctx's error,
+// because a VM whose start smolvm was interrupted in runs on where Delete cannot see it.
 func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// A bare VM pulls no image. Without --proxy, smolvm fails if the host's proxy listens only on loopback.
 	args := []string{"machine", "start", "--name", name, "--proxy", ""}
 	if opts.Branchable {
 		args = append(args, "--branchable")
 	}
-	return c.do(ctx, args...)
+	err := c.do(context.WithoutCancel(ctx), args...)
+	if ctx.Err() != nil {
+		return fmt.Errorf("smolvm %s: %w", commandLine(args), ctx.Err())
+	}
+	return err
 }
 
 func (c CLI) Stop(ctx context.Context, name string) error {
