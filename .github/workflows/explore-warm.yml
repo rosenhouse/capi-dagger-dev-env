@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [lifecycle, corrupt, interrupt]
+        script: [disk]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -30,56 +30,6 @@ jobs:
           path: |
             .devenv/
             ~/.cache/devenv/platform-save/
-            ${{ runner.temp }}/explore
-          include-hidden-files: true
-          retention-days: 3
-  donor:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/smolvm
-        with:
-          version: ${{ env.SMOLVM_VERSION }}
-          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
-      - run: |
-          go run ./cmd/devenv platform save
-          mkdir -p "$RUNNER_TEMP/donor"
-          mv ~/.cache/devenv/platform/*.checkpoint "$RUNNER_TEMP/donor/"
-          echo "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs), $(go run ./cmd/devenv platform key --inputs | jq -r .contract)" >"$RUNNER_TEMP/donor/donor.txt"
-          cat "$RUNNER_TEMP/donor/donor.txt"
-          ls -la "$RUNNER_TEMP/donor"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: donor
-          path: ${{ runner.temp }}/donor
-          compression-level: 0
-          retention-days: 1
-  cross:
-    needs: donor
-    strategy:
-      fail-fast: false
-      matrix:
-        job: [1, 2]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/smolvm
-        with:
-          version: ${{ env.SMOLVM_VERSION }}
-          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: donor
-          path: ${{ runner.temp }}/donor
-      - run: bash hack/explore-warm/cross.sh
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cross-${{ matrix.job }}
-          path: |
-            .devenv/
             ${{ runner.temp }}/explore
           include-hidden-files: true
           retention-days: 3
