@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,7 +37,16 @@ func TestMain(m *testing.M) {
 // It prints FAKE_SMOLVM_VERSION for --version, and FAKE_SMOLVM_EXEC_STDOUT for machine exec.
 // It fails calls that start with FAKE_SMOLVM_FAIL, printing FAKE_SMOLVM_FAIL_STDERR, or only the first such call
 // with FAKE_SMOLVM_FAIL_ONCE set.
+// Calls run one at a time, as smolvm's own database serializes them.
 func fakeSmolvmMain(dir string, args []string) int {
+	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		panic(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		panic(err)
+	}
 	call := strings.Join(args, " ")
 	f, err := os.OpenFile(filepath.Join(dir, "calls"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -103,7 +113,11 @@ func writeMachines(dir string, machines []smolvm.Machine) {
 	if err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "machines.json"), data, 0o600); err != nil {
+	tmp := filepath.Join(dir, ".machines.json")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, "machines.json")); err != nil {
 		panic(err)
 	}
 }
