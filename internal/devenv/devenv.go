@@ -113,16 +113,17 @@ func (e *Environment) bringUp(ctx context.Context) error {
 	return e.stage("workload cluster", func() error { return e.workloadCluster(ctx, c) })
 }
 
+// The workload Cluster's name and namespace in the management cluster.
 const (
-	workloadCluster   = "work"
-	workloadNamespace = "default"
+	WorkloadCluster   = "work"
+	WorkloadNamespace = "default"
 	// remotePackageInstall is the name addon-manager gives greeting-controller's PackageInstall.
-	remotePackageInstall = workloadCluster + "-greeting-controller"
+	remotePackageInstall = WorkloadCluster + "-greeting-controller"
 )
 
 // workloadCluster creates the workload cluster and waits for addon-manager to install greeting-controller into it.
 func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) error {
-	if err := platform.CreateWorkloadCluster(ctx, c, e.infra, workloadCluster, workloadNamespace); err != nil {
+	if err := platform.CreateWorkloadCluster(ctx, c, e.infra, WorkloadCluster, WorkloadNamespace); err != nil {
 		return err
 	}
 	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
@@ -132,7 +133,7 @@ func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) err
 	if err := ready.Wait(ctx, ready.Gate{
 		Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second,
 		Check: func(ctx context.Context) error {
-			return kube.ClusterAvailable(ctx, dyn, workloadNamespace, workloadCluster)
+			return kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster)
 		},
 	}); err != nil {
 		return err
@@ -140,7 +141,7 @@ func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) err
 	if err := ready.Wait(ctx, ready.Gate{
 		Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
 		Check: func(ctx context.Context) error {
-			return kube.PackageInstallReconciled(ctx, dyn, workloadNamespace, remotePackageInstall)
+			return kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall)
 		},
 	}); err != nil {
 		return err
@@ -150,7 +151,7 @@ func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) err
 
 // workloadAPI tunnels the workload API server to the host and writes its kubeconfig.
 func (e *Environment) workloadAPI(ctx context.Context) error {
-	if err := e.infra.ForwardWorkloadAPI(ctx, workloadCluster); err != nil {
+	if err := e.infra.ForwardWorkloadAPI(ctx, WorkloadCluster); err != nil {
 		return err
 	}
 	port, err := e.infra.Tunnel(ctx, infra.WorkloadAPIPort)
@@ -161,7 +162,7 @@ func (e *Environment) workloadAPI(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	secret, err := mgmt.CoreV1().Secrets(workloadNamespace).Get(ctx, workloadCluster+"-kubeconfig", metav1.GetOptions{})
+	secret, err := mgmt.CoreV1().Secrets(WorkloadNamespace).Get(ctx, WorkloadCluster+"-kubeconfig", metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -353,8 +354,8 @@ func (e *Environment) Verify(ctx context.Context) error {
 		kube.NodesReady(ctx, cs),
 		kube.NodesReady(ctx, workload),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
-		kube.ClusterAvailable(ctx, dyn, workloadNamespace, workloadCluster),
-		kube.PackageInstallReconciled(ctx, dyn, workloadNamespace, remotePackageInstall),
+		kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster),
+		kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall),
 	)
 }
 
