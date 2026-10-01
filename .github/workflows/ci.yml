@@ -56,7 +56,7 @@ jobs:
           path: ${{ runner.temp }}/smolvm-logs
   # Only CI on smol publishes checkpoints, and only for AMD EPYC 7763, which runs about half of the jobs:
   # each checkpoint takes about 3 GB of the repository's 10 GB cache, which main's CI shares.
-  # Runners land on random CPUs, so four jobs make one on a 7763 likely.
+  # Runners land on random CPUs. Four jobs all missed a 7763 once, so there are eight; the others stop at once.
   # A manual run on another branch tests this job without publishing.
   platform:
     if: github.event_name != 'pull_request'
@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [1, 2, 3, 4]
+        job: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
