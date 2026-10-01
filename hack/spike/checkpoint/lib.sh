@@ -28,14 +28,12 @@ rate() { awk -v h1="$1" -v u1="$2" -v h2="$3" -v u2="$4" 'BEGIN { printf "%.3f",
 # A bare connect succeeds even with no guest listener, so read the payload.
 probe() { timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1 && cat <&3" 2>/dev/null || true; }
 
-cpu_model() { awk -F': *' '/^model name/ { print $2; exit }' /proc/cpuinfo; }
+vm_size() { curl -fsS -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/vmSize?api-version=2021-02-01&format=text' 2>/dev/null || echo unknown; }
 
-# host_info: runner image, kernel, microcode and Azure VM size.
-host_info() {
-  local size
-  size=$(curl -fsS -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/vmSize?api-version=2021-02-01&format=text' 2>/dev/null) || size=unknown
-  echo "image ${ImageVersion:-?}, kernel $(uname -r), $(grep -m1 microcode /proc/cpuinfo | tr -d '\t'), vm size $size"
-}
+# cpu_model: the CPU model name and the Azure VM size, which decides the CPUID mask.
+cpu_model() { echo "$(awk -F': *' '/^model name/ { print $2; exit }' /proc/cpuinfo) on $(vm_size)"; }
+
+host_info() { echo "image ${ImageVersion:-?}, kernel $(uname -r), $(grep -m1 microcode /proc/cpuinfo | tr -d '\t')"; }
 
 # host_contract [CPUINFO]: smolvm's checkpoint CPU contract for this host.
 # Mirrors checkpoint_cpu_contract() and cpu_fingerprint() in smolvm v1.22.0
