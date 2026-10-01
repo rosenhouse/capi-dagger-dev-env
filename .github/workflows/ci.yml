@@ -98,14 +98,18 @@ jobs:
           say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
           say "### Two environments at once"
           say "Before: $(free -m | awk '/^Mem:/ { print $3 }') MiB of memory and $(df --output=used -BG / | tail -1 | tr -d ' ') of disk used."
-          (while sleep 5; do echo "$(free -m | awk '/^Mem:/ { print $3 }') $(df --output=used -BG / | tail -1 | tr -d ' G')"; done >"$RUNNER_TEMP/usage.log") &
+          # Each sample: host memory used and the VMs' RSS in MiB, and disk used in GB.
+          (while sleep 5; do
+            echo "$(free -m | awk '/^Mem:/ { print $3 }') $(ps -C smolvm-bin -o rss= | awk '{ s += $1 } END { print int(s / 1024) }') $(df --output=used -BG / | tail -1 | tr -d ' G')"
+          done >"$RUNNER_TEMP/usage.log") &
           "$RUNNER_TEMP/devenv" test --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
           "$RUNNER_TEMP/devenv" test 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
           status=0
           wait $a || status=1
           wait $r || status=1
-          say "Peak: $(sort -n "$RUNNER_TEMP/usage.log" | tail -1 | cut -d' ' -f1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used," \
-            "$(cut -d' ' -f2 "$RUNNER_TEMP/usage.log" | sort -n | tail -1) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk."
+          peak() { cut -d' ' -f"$1" "$RUNNER_TEMP/usage.log" | sort -n | tail -1; }
+          say "Peak: $(peak 1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used, $(peak 2) MiB of it by the VMs;" \
+            "$(peak 3) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk used."
           for env in a random; do
             say "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s."
           done
