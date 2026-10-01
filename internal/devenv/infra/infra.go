@@ -17,7 +17,7 @@ const (
 	KubernetesVersion  = "v1.37.0"
 	ClusterctlVersion  = "v1.14.2"
 	MgmtAPIPort        = 6443
-	containerdCertsDir = "/etc/devenv/certs.d"
+	ContainerdCertsDir = "/etc/devenv/certs.d"
 
 	// Digests avoid a registry round trip, and its rate limit, when the image is cached.
 	dindImage      = "docker:29-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0"
@@ -57,7 +57,7 @@ nodes:
     containerPath: /var/run/docker.sock
   - hostPath: %s
     containerPath: /etc/containerd/certs.d
-`, MgmtAPIPort, containerdCertsDir)
+`, MgmtAPIPort, ContainerdCertsDir)
 
 // Infra holds the long-lived services of one environment's Dagger session.
 type Infra struct {
@@ -102,7 +102,7 @@ func Start(ctx context.Context, c *dagger.Client, envID, registryHost string) (*
 
 	dind, err := c.Container().From(dindImage).
 		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
-		WithNewFile(containerdCertsDir+"/"+registryHost+"/hosts.toml",
+		WithNewFile(ContainerdCertsDir+"/"+registryHost+"/hosts.toml",
 			fmt.Sprintf("server = %[1]q\n\n[host.%[1]q]\n  capabilities = [\"pull\", \"resolve\"]\n", "http://"+registryHost)).
 		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+envID+"-docker"),
 			dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeLocked}).

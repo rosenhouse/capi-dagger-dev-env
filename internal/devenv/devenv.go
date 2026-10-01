@@ -105,7 +105,38 @@ func (e *Environment) bringUp(ctx context.Context) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return e.stage("management packages", func() error { return e.installPackages(ctx) })
+	if err := e.stage("management packages", func() error { return e.installPackages(ctx) }); err != nil {
+		return err
+	}
+	return e.stage("workload cluster", func() error { return e.workloadCluster(ctx, c) })
+}
+
+const (
+	workloadCluster   = "work"
+	workloadNamespace = "default"
+)
+
+// workloadCluster creates the workload cluster and waits for addon-manager to install greeting-controller into it.
+func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) error {
+	if err := platform.CreateWorkloadCluster(ctx, c, e.infra, workloadCluster, workloadNamespace); err != nil {
+		return err
+	}
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	if err := ready.Wait(ctx, ready.Gate{
+		Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second,
+		Check: func(ctx context.Context) error {
+			return kube.ClusterAvailable(ctx, dyn, workloadNamespace, workloadCluster)
+		},
+	}); err != nil {
+		return err
+	}
+	return ready.Wait(ctx, ready.Gate{
+		Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, workloadNamespace) },
+	})
 }
 
 func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client, registryHost string) error {
@@ -275,7 +306,12 @@ func (e *Environment) Verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return errors.Join(kube.NodesReady(ctx, cs), kube.PackageInstallsReconciled(ctx, dyn, "devenv"))
+	return errors.Join(
+		kube.NodesReady(ctx, cs),
+		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
+		kube.ClusterAvailable(ctx, dyn, workloadNamespace, workloadCluster),
+		kube.PackageInstallsReconciled(ctx, dyn, workloadNamespace),
+	)
 }
 
 // Close ends the Dagger session, which stops every service in the environment.
