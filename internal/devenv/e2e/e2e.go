@@ -9,7 +9,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -46,7 +45,7 @@ func GreetingReachesWorkloadCluster(ctx context.Context, mgmtKubeconfig, workloa
 			return err
 		}
 		if err := ready.Wait(ctx, ready.Gate{
-			Name: fmt.Sprintf("workload cluster serves %q", message), Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+			Name: fmt.Sprintf("workload cluster serves %q", message), Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: 30 * time.Second,
 			Check: func(ctx context.Context) error { return serves(ctx, workload, message) },
 		}); err != nil {
 			return err
@@ -63,7 +62,7 @@ func HelloServesVersion(ctx context.Context, workloadKubeconfig, version string)
 		return err
 	}
 	return ready.Wait(ctx, ready.Gate{
-		Name: fmt.Sprintf("workload cluster serves hello %s", version), Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		Name: fmt.Sprintf("workload cluster serves hello %s", version), Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: 30 * time.Second,
 		Check: func(ctx context.Context) error {
 			body, err := get(ctx, workload)
 			if err != nil {
@@ -96,7 +95,7 @@ func get(ctx context.Context, cs kubernetes.Interface) (string, error) {
 }
 
 func controllerRuntimeClient(kubeconfig string) (client.Client, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	cfg, err := kube.Config(kubeconfig)
 	if err != nil {
 		return nil, err
 	}
