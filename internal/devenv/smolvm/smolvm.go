@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Version is the smolvm release this package drives.
@@ -26,7 +28,7 @@ type CLI struct {
 
 // ExitError reports a smolvm command that exited nonzero.
 type ExitError struct {
-	// Command holds smolvm's arguments, up to any "--".
+	// Command holds smolvm's arguments up to any "--", without environment values.
 	Command string
 	// Code is smolvm's exit code. Exec passes on the guest command's code, but smolvm's own failures exit 1 too.
 	Code int
@@ -35,7 +37,7 @@ type ExitError struct {
 }
 
 func (e *ExitError) Error() string {
-	return strings.TrimSuffix(fmt.Sprintf("smolvm %s: exit %d\n%s", e.Command, e.Code, e.Stderr), "\n")
+	return fmt.Sprintf("smolvm %s: exit %d%s", e.Command, e.Code, onNewLine(e.Stderr))
 }
 
 // CheckVersion fails unless smolvm is installed at Version.
@@ -62,23 +64,50 @@ func (c CLI) output(ctx context.Context, args ...string) (string, error) {
 
 func (c CLI) run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, cmp.Or(c.Path, "smolvm"), args...)
+	// On SIGINT, smolvm kills a VM it is starting. SIGKILL would orphan the VM.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = waitDelay
 	var tail tail
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, &tail
 	if stderr != nil {
 		cmd.Stderr = io.MultiWriter(stderr, &tail)
 	}
 	err := cmd.Run()
-	command := args
-	if i := slices.Index(args, "--"); i >= 0 {
-		command = args[:i]
+	if err == nil {
+		return nil
+	}
+	command := commandLine(args)
+	if ctx.Err() != nil {
+		return fmt.Errorf("smolvm %s: %w%s", command, ctx.Err(), onNewLine(tail.String()))
 	}
 	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) {
-		return &ExitError{Command: strings.Join(command, " "), Code: exit.ExitCode(), Stderr: tail.String()}
+		return &ExitError{Command: command, Code: exit.ExitCode(), Stderr: tail.String()}
 	}
-	if err != nil {
-		return fmt.Errorf("smolvm %s: %w", strings.Join(command, " "), err)
+	return fmt.Errorf("smolvm %s: %w", command, err)
+}
+
+func onNewLine(s string) string {
+	if s == "" {
+		return ""
 	}
-	return nil
+	return "\n" + s
+}
+
+// waitDelay bounds how long smolvm may ignore SIGINT.
+var waitDelay = 5 * time.Second
+
+// commandLine returns args up to any "--", without environment values.
+func commandLine(args []string) string {
+	if i := slices.Index(args, "--"); i >= 0 {
+		args = args[:i]
+	}
+	args = slices.Clone(args)
+	for i := 1; i < len(args); i++ {
+		if args[i-1] == "-e" {
+			args[i], _, _ = strings.Cut(args[i], "=")
+		}
+	}
+	return strings.Join(args, " ")
 }
 
 const (

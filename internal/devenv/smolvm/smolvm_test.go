@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -21,6 +22,14 @@ import (
 // arguments and stdin there and replies with FAKE_SMOLVM_STDOUT, FAKE_SMOLVM_STDERR and FAKE_SMOLVM_EXIT.
 func TestMain(m *testing.M) {
 	if path := os.Getenv("FAKE_SMOLVM_CALL"); path != "" {
+		onInterrupt := os.Getenv("FAKE_SMOLVM_ON_INTERRUPT")
+		interrupted := make(chan os.Signal, 1)
+		switch onInterrupt {
+		case "exit":
+			signal.Notify(interrupted, os.Interrupt)
+		case "ignore":
+			signal.Ignore(os.Interrupt)
+		}
 		stdin, _ := io.ReadAll(os.Stdin)
 		call, _ := json.Marshal(fakeCall{Args: os.Args[1:], Stdin: string(stdin)})
 		if err := os.WriteFile(path, call, 0o644); err != nil {
@@ -28,6 +37,14 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Print(os.Getenv("FAKE_SMOLVM_STDOUT"))
 		fmt.Fprint(os.Stderr, os.Getenv("FAKE_SMOLVM_STDERR"))
+		switch onInterrupt {
+		case "exit":
+			<-interrupted
+			fmt.Fprintln(os.Stderr, "interrupted")
+			os.Exit(130)
+		case "ignore":
+			time.Sleep(time.Hour)
+		}
 		code, _ := strconv.Atoi(os.Getenv("FAKE_SMOLVM_EXIT"))
 		os.Exit(code)
 	}
@@ -42,6 +59,8 @@ type fakeCall struct {
 type fake struct {
 	stdout, stderr string
 	exit           int
+	// onInterrupt makes the fake wait after replying: until SIGINT for "exit", or forever for "ignore".
+	onInterrupt string
 }
 
 // start returns a CLI that runs the fake, and a function that returns the fake's last call.
@@ -52,6 +71,7 @@ func (f fake) start(t *testing.T) (smolvm.CLI, func() fakeCall) {
 	t.Setenv("FAKE_SMOLVM_STDOUT", f.stdout)
 	t.Setenv("FAKE_SMOLVM_STDERR", f.stderr)
 	t.Setenv("FAKE_SMOLVM_EXIT", strconv.Itoa(f.exit))
+	t.Setenv("FAKE_SMOLVM_ON_INTERRUPT", f.onInterrupt)
 	return smolvm.CLI{Path: os.Args[0]}, func() fakeCall {
 		t.Helper()
 		data, err := os.ReadFile(path)
@@ -184,6 +204,12 @@ func TestCommandLines(t *testing.T) {
 			return c.Exec(ctx, "m", []string{"echo", "a b"}, smolvm.ExecOptions{Env: []string{"A=1", "B=2"}, Timeout: 1500 * time.Millisecond})
 		},
 		[]string{"machine", "exec", "--name", "m", "-e", "A=1", "-e", "B=2", "--timeout", "1500ms", "--stream", "--", "echo", "a b"},
+	}, {
+		"exec with a timeout under 1ms",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Exec(ctx, "m", []string{"true"}, smolvm.ExecOptions{Timeout: time.Nanosecond})
+		},
+		[]string{"machine", "exec", "--name", "m", "--timeout", "1ms", "--stream", "--", "true"},
 	}, {
 		"exec with stdin",
 		func(ctx context.Context, c smolvm.CLI) error {
@@ -345,6 +371,74 @@ func TestExecKeepsTheTailOfALongLine(t *testing.T) {
 	if !errors.As(err, &exit) || !strings.HasSuffix(exit.Stderr, "xend") || len(exit.Stderr) > 10_000 {
 		t.Errorf("error = %.100v...", err)
 	}
+}
+
+func TestExecErrorsHideEnvValues(t *testing.T) {
+	c, _ := fake{exit: 1}.start(t)
+
+	err := c.Exec(t.Context(), "m", []string{"false"}, smolvm.ExecOptions{Env: []string{"TOKEN=secret"}})
+
+	if want := "smolvm machine exec --name m -e TOKEN --stream: exit 1"; err == nil || err.Error() != want {
+		t.Errorf("error = %v; want %s", err, want)
+	}
+}
+
+func TestExecRejectsDetachWithStdinOrTimeout(t *testing.T) {
+	c, _ := fake{}.start(t)
+	for _, opts := range []smolvm.ExecOptions{
+		{Detach: true, Stdin: strings.NewReader("")},
+		{Detach: true, Timeout: time.Second},
+	} {
+		if err := c.Exec(t.Context(), "m", []string{"true"}, opts); err == nil {
+			t.Errorf("Exec(%+v) returned no error", opts)
+		}
+	}
+}
+
+func TestCancellingInterruptsSmolvm(t *testing.T) {
+	c, _ := fake{stdout: "started", stderr: "starting\n", onInterrupt: "exit"}.start(t)
+	ctx, cancel := context.WithCancel(t.Context())
+
+	err := execUntilCancelled(t, c, ctx, cancel)
+
+	if want := "smolvm machine exec --name m --stream: context canceled\nstarting\ninterrupted"; !errors.Is(err, context.Canceled) || err.Error() != want {
+		t.Errorf("error =\n%v\nwant context.Canceled and\n%s", err, want)
+	}
+}
+
+func TestCancellingKillsSmolvmIfItIgnoresInterrupts(t *testing.T) {
+	smolvm.SetWaitDelay(t, 10*time.Millisecond)
+	c, _ := fake{stdout: "started", onInterrupt: "ignore"}.start(t)
+	ctx, cancel := context.WithCancel(t.Context())
+
+	err := execUntilCancelled(t, c, ctx, cancel)
+
+	if want := "smolvm machine exec --name m --stream: context canceled"; !errors.Is(err, context.Canceled) || err.Error() != want {
+		t.Errorf("error = %v; want context.Canceled and %s", err, want)
+	}
+}
+
+// execUntilCancelled cancels an Exec once the fake writes to stdout, and returns Exec's error.
+func execUntilCancelled(t *testing.T, c smolvm.CLI, ctx context.Context, cancel context.CancelFunc) error {
+	t.Helper()
+	done := make(chan error)
+	go func() {
+		done <- c.Exec(ctx, "m", []string{"sleep", "9"}, smolvm.ExecOptions{Stdout: cancelOnWrite(cancel)})
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Exec did not return after its context was cancelled")
+		return nil
+	}
+}
+
+type cancelOnWrite context.CancelFunc
+
+func (c cancelOnWrite) Write(p []byte) (int, error) {
+	c()
+	return len(p), nil
 }
 
 func TestRunReturnsStdout(t *testing.T) {

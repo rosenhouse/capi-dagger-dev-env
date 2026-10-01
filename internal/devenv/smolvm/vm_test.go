@@ -131,7 +131,12 @@ func machineName() string { return fmt.Sprintf("devenv-test-%08x", rand.Uint32()
 func deleteLater(t *testing.T, c smolvm.CLI, name string) {
 	t.Cleanup(func() {
 		ctx := context.Background()
-		if _, err := c.Status(ctx, name); err != nil {
+		machines, err := c.List(ctx)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if !slices.ContainsFunc(machines, func(m smolvm.Machine) bool { return m.Name == name }) {
 			return
 		}
 		if t.Failed() {
