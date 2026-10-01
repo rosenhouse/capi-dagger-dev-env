@@ -203,7 +203,7 @@ func Open(ctx context.Context, o Options) (*Environment, error) {
 		err = fmt.Errorf("environment %s is not running", env.Name)
 	}
 	if err == nil {
-		e.Ports, err = env.Ports()
+		e.Ports, err = env.ReadPorts()
 	}
 	if err != nil {
 		return nil, errors.Join(err, e.Close())

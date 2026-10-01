@@ -312,7 +312,7 @@ func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := env.Ports()
+	p, err := env.ReadPorts()
 	if err != nil || p != e.Ports {
 		t.Fatalf("recorded ports %+v, %v; want %+v", p, err, e.Ports)
 	}
