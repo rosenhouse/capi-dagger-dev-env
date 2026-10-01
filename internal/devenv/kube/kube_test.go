@@ -33,6 +33,24 @@ func TestNodesReadyFailsWithoutNodes(t *testing.T) {
 	}
 }
 
+func TestRestartsCountsEveryContainerInEveryNamespace(t *testing.T) {
+	pod := func(namespace, name string, restarts ...int32) runtime.Object {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+		for _, r := range restarts {
+			p.Status.ContainerStatuses = append(p.Status.ContainerStatuses, corev1.ContainerStatus{RestartCount: r})
+		}
+		p.Status.InitContainerStatuses = []corev1.ContainerStatus{{RestartCount: 1}}
+		return p
+	}
+	cs := fake.NewClientset(pod("kube-system", "kube-apiserver", 2), pod("default", "hello", 0, 3))
+
+	got, err := kube.Restarts(context.Background(), cs)
+
+	if err != nil || got != 7 {
+		t.Errorf("Restarts() = %d, %v; want 7", got, err)
+	}
+}
+
 func node(name string, ready corev1.ConditionStatus) runtime.Object {
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
