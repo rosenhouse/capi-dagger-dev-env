@@ -33,7 +33,7 @@ A failure names the stage and the readiness gate that failed.
 
 ## Use with your own controllers
 
-Write a `main` package that passes your commands, packages and tests to `cli.Main`:
+Write a `main` package in your module that passes your commands and packages to `cli.Main`:
 
 ```go
 func main() {
@@ -42,9 +42,10 @@ func main() {
 		Packages: []devenv.Package{
 			{Name: "manager", RefName: "manager.example.com", Config: "config/manager", Images: []string{"manager"}},
 		},
-		Test: func(ctx context.Context, e *devenv.Environment) error { /* ... */ },
 	})
 }
 ```
 
-See [`devenv.Config`](devenv/config.go) for each field, and [`cmd/devenv`](cmd/devenv/main.go) for the Greeting example's configuration.
+Run it from your module, which devenv builds from.
+devenv stamps each build's version into a command's `var version string` in package `main`.
+See [`devenv.Config`](devenv/config.go) for the hooks, and [`cmd/devenv`](cmd/devenv/main.go) for the Greeting example's configuration.

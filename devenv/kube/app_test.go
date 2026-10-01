@@ -16,14 +16,14 @@ const newBundle = "reg/bundles/a@sha256:new"
 
 func TestBundleAppsDeployedWhenEveryAppReconciledItsBundle(t *testing.T) {
 	dyn := apps(app("devenv", "a", newBundle, 2, 2, "ReconcileSucceeded"), app("default", "work-a", newBundle, 1, 1, "ReconcileSucceeded"))
-	if err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle}); err != nil {
+	if err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle}, nil); err != nil {
 		t.Error(err)
 	}
 }
 
 func TestBundleAppsDeployedWaitsForAnAppStillOnTheOldBundle(t *testing.T) {
 	dyn := apps(app("devenv", "a", newBundle, 2, 2, "ReconcileSucceeded"), app("default", "work-a", "reg/bundles/a@sha256:old", 1, 1, "ReconcileSucceeded"))
-	err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle})
+	err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle}, nil)
 	if err == nil || err.Error() != "App default/work-a fetches reg/bundles/a@sha256:old, not "+newBundle {
 		t.Errorf("err = %v", err)
 	}
@@ -31,13 +31,13 @@ func TestBundleAppsDeployedWaitsForAnAppStillOnTheOldBundle(t *testing.T) {
 
 func TestBundleAppsDeployedIgnoresAppsOfOtherBundles(t *testing.T) {
 	dyn := apps(app("devenv", "a", newBundle, 2, 2, "ReconcileSucceeded"), app("other", "b", "elsewhere/b@sha256:old", 1, 0, "Reconciling"))
-	if err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle}); err != nil {
+	if err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle}, nil); err != nil {
 		t.Error(err)
 	}
 }
 
 func TestBundleAppsDeployedNeedsAnApp(t *testing.T) {
-	err := kube.BundleAppsDeployed(context.Background(), apps(), []string{newBundle})
+	err := kube.BundleAppsDeployed(context.Background(), apps(), []string{newBundle}, nil)
 	if err == nil || err.Error() != "no App fetches "+newBundle {
 		t.Errorf("err = %v", err)
 	}
@@ -45,7 +45,7 @@ func TestBundleAppsDeployedNeedsAnApp(t *testing.T) {
 
 func TestBundleAppsDeployedWaitsForReconcileOfTheCurrentGeneration(t *testing.T) {
 	dyn := apps(app("devenv", "a", newBundle, 3, 2, "ReconcileSucceeded"))
-	err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle})
+	err := kube.BundleAppsDeployed(context.Background(), dyn, []string{newBundle}, nil)
 	if err == nil || err.Error() != "App devenv/a not yet reconciled at generation 3" {
 		t.Errorf("err = %v", err)
 	}
@@ -55,7 +55,7 @@ func TestBundleAppsDeployedReportsFailure(t *testing.T) {
 	failed := app("devenv", "a", newBundle, 2, 2, "ReconcileFailed")
 	unstructured.SetNestedField(failed.Object, "Reconcile failed: Deploying: Error", "status", "friendlyDescription")
 	unstructured.SetNestedField(failed.Object, "kapp: Error: timed out waiting", "status", "usefulErrorMessage")
-	err := kube.BundleAppsDeployed(context.Background(), apps(failed), []string{newBundle})
+	err := kube.BundleAppsDeployed(context.Background(), apps(failed), []string{newBundle}, nil)
 	if err == nil || err.Error() != "App devenv/a: Reconcile failed: Deploying: Error: kapp: Error: timed out waiting" {
 		t.Errorf("err = %v", err)
 	}
@@ -64,9 +64,32 @@ func TestBundleAppsDeployedReportsFailure(t *testing.T) {
 func TestBundleAppsDeployedReportsReconciling(t *testing.T) {
 	reconciling := app("devenv", "a", newBundle, 2, 2, "Reconciling")
 	unstructured.SetNestedField(reconciling.Object, "Reconciling", "status", "friendlyDescription")
-	err := kube.BundleAppsDeployed(context.Background(), apps(reconciling), []string{newBundle})
+	err := kube.BundleAppsDeployed(context.Background(), apps(reconciling), []string{newBundle}, nil)
 	if err == nil || err.Error() != "App devenv/a: Reconciling" {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestBundleAppsDeployedDoesNotNeedAnAppForAnOptionalBundle(t *testing.T) {
+	if err := kube.BundleAppsDeployed(context.Background(), apps(), nil, []string{newBundle}); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestBundleAppsDeployedWaitsForAnAppOfAnOptionalBundle(t *testing.T) {
+	dyn := apps(app("default", "work-a", "reg/bundles/a@sha256:old", 1, 1, "ReconcileSucceeded"))
+	err := kube.BundleAppsDeployed(context.Background(), dyn, nil, []string{newBundle})
+	if err == nil || err.Error() != "App default/work-a fetches reg/bundles/a@sha256:old, not "+newBundle {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestBundleAppsDeployedFindsTheBundleInAnyFetchStep(t *testing.T) {
+	a := app("devenv", "a", newBundle, 2, 2, "ReconcileSucceeded")
+	fetch, _, _ := unstructured.NestedSlice(a.Object, "spec", "fetch")
+	unstructured.SetNestedSlice(a.Object, append([]any{map[string]any{"git": map[string]any{"url": "https://example.com/repo"}}}, fetch...), "spec", "fetch")
+	if err := kube.BundleAppsDeployed(context.Background(), apps(a), []string{newBundle}, nil); err != nil {
+		t.Error(err)
 	}
 }
 

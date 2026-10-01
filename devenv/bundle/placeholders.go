@@ -1,13 +1,17 @@
 package bundle
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 )
 
@@ -15,26 +19,37 @@ import (
 // every "image" field, and every field a kbld Config's searchRules name, except digest-pinned references.
 // A package's images lock should name exactly these.
 func Placeholders(dir string) ([]string, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
-	if err != nil {
-		return nil, err
-	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no YAML in %s", dir)
-	}
 	var docs []map[string]any
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			return nil, err
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || (filepath.Ext(path) != ".yaml" && filepath.Ext(path) != ".yml") {
+			return err
 		}
-		for _, doc := range strings.Split(string(raw), "\n---") {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		r := utilyaml.NewYAMLReader(bufio.NewReader(f))
+		for {
+			doc, err := r.Read()
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
 			obj := map[string]any{}
-			if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
-				return nil, fmt.Errorf("%s: %w", f, err)
+			if err := yaml.Unmarshal(doc, &obj); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
 			}
 			docs = append(docs, obj)
 		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("no YAML in %s", dir)
 	}
 	keys := map[string]bool{"image": true}
 	for _, doc := range docs {

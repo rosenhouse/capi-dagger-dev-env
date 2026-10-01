@@ -129,3 +129,21 @@ searchRules:
 		t.Errorf("Placeholders() = %v, %v", got, err)
 	}
 }
+
+func TestPlaceholdersReadsSubdirectoriesAndYml(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, image := range map[string]string{"a.yaml": "a", "sub/b.yml": "b"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("image: "+image+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := bundle.Placeholders(dir)
+
+	if err != nil || !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("Placeholders() = %v, %v", got, err)
+	}
+}

@@ -31,6 +31,7 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/state"
 )
 
+// Options names an environment and says where it reports.
 type Options struct {
 	Name     string
 	StateDir string
@@ -45,8 +46,8 @@ type Environment struct {
 	state.Env
 	MgmtKubeconfig     string
 	WorkloadKubeconfig string
-	// Packages are rendered Package resources for the first-party bundles in the session registry.
-	Packages [][]byte
+	// packages are rendered Package resources for the bundles in the session registry.
+	packages [][]byte
 	// bundles maps each package name to its bundle's digest reference.
 	bundles map[string]string
 
@@ -144,18 +145,7 @@ func (e *Environment) handlers() map[string]control.Handler {
 		"down": func(context.Context, []string, io.Writer) error { e.cancel(); return nil },
 		// redeploy takes an optional version to stamp the build with.
 		"redeploy": func(ctx context.Context, args []string, progress io.Writer) error {
-			if !e.isUp.Load() {
-				return errors.New("the environment is still coming up")
-			}
-			if !e.redeploying.TryLock() {
-				return errors.New("another redeploy is in progress")
-			}
-			defer e.redeploying.Unlock()
-			version := strings.Join(args, " ")
-			if !validVersion.MatchString(version) {
-				return fmt.Errorf("version %q is not letters, digits and ._+-", version)
-			}
-			return e.redeploy(ctx, version, progress)
+			return e.Redeploy(ctx, strings.Join(args, " "), progress)
 		},
 	}
 }
@@ -324,9 +314,13 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 	if err != nil {
 		return err
 	}
-	images := build.Images(c, b.Binaries, e.cfg.Commands)
+	var hook map[string]*dagger.Container
 	if e.cfg.Images != nil {
-		maps.Copy(images, e.cfg.Images(c, b.Source, b.Version))
+		hook = e.cfg.Images(c, b.Source, b.Version)
+	}
+	images, err := e.cfg.images(build.Images(c, b.Binaries, e.cfg.Commands), hook)
+	if err != nil {
+		return err
 	}
 	refs := map[string]string{}
 	for name, image := range images {
@@ -356,9 +350,14 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 		pkgs = append(pkgs, pkg)
 		bundles[p.Name] = ref
 	}
-	e.Packages, e.bundles = pkgs, bundles
+	e.packages, e.bundles = pkgs, bundles
 	return nil
 }
+
+const (
+	installerNamespace      = "devenv"
+	installerServiceAccount = "devenv-installer"
+)
 
 // installerManifests let kapp-controller install the management packages with cluster-admin.
 const installerManifests = `apiVersion: v1
@@ -387,18 +386,11 @@ subjects:
 `
 
 func (e *Environment) installPackages(ctx context.Context) error {
-	manifests := [][]byte{[]byte(installerManifests)}
-	manifests = append(manifests, e.Packages...)
-	for _, p := range e.cfg.Packages {
-		if p.On != Management {
-			continue
-		}
-		pkgi, err := bundle.PackageInstall(p.Name, p.RefName, packageVersion, "devenv", "devenv-installer")
-		if err != nil {
-			return err
-		}
-		manifests = append(manifests, pkgi)
+	pkgis, err := e.cfg.packageInstalls()
+	if err != nil {
+		return err
 	}
+	manifests := slices.Concat([][]byte{[]byte(installerManifests)}, e.packages, pkgis)
 	if err := platform.Apply(ctx, e.infra, bytes.Join(manifests, []byte("---\n"))); err != nil {
 		return err
 	}
@@ -408,7 +400,7 @@ func (e *Environment) installPackages(ctx context.Context) error {
 	}
 	return ready.Wait(ctx, ready.Gate{
 		Name: "PackageInstalls reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
-		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, "devenv") },
+		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, installerNamespace) },
 	})
 }
 
@@ -424,10 +416,20 @@ func subset(m map[string]string, keys []string) (map[string]string, error) {
 	return out, nil
 }
 
-// redeploy rebuilds images and bundles from the current source and waits for every App,
+// Redeploy rebuilds images and bundles from the current source and waits for every App,
 // in any namespace, that fetches one of them to deploy the new bundle. An empty version names the build by its source.
 // It reports its stages to progress as well as to the environment's own progress.
-func (e *Environment) redeploy(ctx context.Context, version string, progress io.Writer) error {
+func (e *Environment) Redeploy(ctx context.Context, version string, progress io.Writer) error {
+	if !e.isUp.Load() {
+		return errors.New("the environment is still coming up")
+	}
+	if !e.redeploying.TryLock() {
+		return errors.New("another redeploy is in progress")
+	}
+	defer e.redeploying.Unlock()
+	if !validVersion.MatchString(version) {
+		return fmt.Errorf("version %q is not letters, digits and ._+-", version)
+	}
 	stage := func(name string, run func() error) error {
 		fmt.Fprintln(progress, name)
 		return e.stage(name, run)
@@ -436,7 +438,7 @@ func (e *Environment) redeploy(ctx context.Context, version string, progress io.
 		return err
 	}
 	return stage("redeploy packages", func() error {
-		if err := platform.Reapply(ctx, e.infra, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
+		if err := platform.Reapply(ctx, e.infra, bytes.Join(e.packages, []byte("---\n"))); err != nil {
 			return err
 		}
 		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
@@ -446,7 +448,7 @@ func (e *Environment) redeploy(ctx context.Context, version string, progress io.
 		return ready.Wait(ctx, ready.Gate{
 			Name: "Apps deployed their new bundles", Timeout: 5 * time.Minute, Interval: 2 * time.Second,
 			Check: func(ctx context.Context) error {
-				return kube.BundleAppsDeployed(ctx, dyn, slices.Collect(maps.Values(e.bundles)))
+				return kube.BundleAppsDeployed(ctx, dyn, e.cfg.bundlesOn(Management, e.bundles), e.cfg.bundlesOn(Workload, e.bundles))
 			},
 		})
 	})

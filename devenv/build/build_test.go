@@ -32,7 +32,7 @@ func TestModuleRootFailsOutsideAModule(t *testing.T) {
 }
 
 func TestImageNameIsTheCommandsDirectory(t *testing.T) {
-	for _, command := range []string{"./cmd/hello", "cmd/hello/", "./hello"} {
+	for _, command := range []string{"./cmd/hello", "./cmd/hello/", "./hello"} {
 		if got := build.ImageName(command); got != "hello" {
 			t.Errorf("ImageName(%q) = %q", command, got)
 		}

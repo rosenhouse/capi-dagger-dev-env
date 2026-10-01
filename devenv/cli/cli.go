@@ -33,7 +33,7 @@ func Main(cfg devenv.Config) {
 // Command is the devenv command line for cfg's components.
 func Command(cfg devenv.Config) *cobra.Command {
 	o := devenv.Options{Progress: os.Stderr}
-	root := &cobra.Command{Use: "devenv", SilenceUsage: true}
+	root := &cobra.Command{Use: filepath.Base(os.Args[0]), SilenceUsage: true}
 	root.PersistentFlags().StringVar(&o.Name, "name", "", "environment name; up and test pick a random one if empty, and reusing a name reuses its cached images")
 	root.PersistentFlags().StringVar(&o.StateDir, "state-dir", ".devenv", "directory for kubeconfigs and logs")
 	root.PersistentFlags().BoolVarP(&o.Verbose, "verbose", "v", false, "stream Dagger logs to stderr")
@@ -48,8 +48,8 @@ func Command(cfg devenv.Config) *cobra.Command {
 				return err
 			}
 			fmt.Printf("Environment %s is up.\n  management: export KUBECONFIG=%s\n  workload:   export KUBECONFIG=%s\n"+
-				"After changing code, run: devenv redeploy --name %s\nPress Ctrl-C to tear it down.\n",
-				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig, env.Name)
+				"After changing code, run: %s redeploy --name %s\nPress Ctrl-C to tear it down.\n",
+				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig, root.Name(), env.Name)
 			<-env.Context().Done()
 			return env.Close()
 		},
@@ -74,7 +74,7 @@ func Command(cfg devenv.Config) *cobra.Command {
 				env.ExportLogs()
 				testErr = fmt.Errorf("%w\nlogs: %s", testErr, env.Dir)
 				if o.Name == "" {
-					testErr = fmt.Errorf("%w\nclean up: devenv down --purge --name %s", testErr, env.Name)
+					testErr = fmt.Errorf("%w\nclean up: %s down --purge --name %s", testErr, root.Name(), env.Name)
 				}
 			}
 			if err := errors.Join(testErr, env.Close()); err != nil {
