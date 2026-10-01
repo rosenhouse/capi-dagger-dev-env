@@ -23,7 +23,11 @@ type Cache struct{ Dir string }
 
 const attempts = 3
 
-var retryDelay = 2 * time.Second
+var (
+	retryDelay = 2 * time.Second
+	// attemptTimeout bounds each download, so a stalled one is retried.
+	attemptTimeout = 10 * time.Minute
+)
 
 // Get returns the path of f's content in the cache. If the cache lacks it, Get downloads it first.
 func (c Cache) Get(ctx context.Context, f File) (string, error) {
@@ -52,6 +56,8 @@ func (c Cache) Get(ctx context.Context, f File) (string, error) {
 
 // download writes f to path once its content matches, so a reader never sees a partial file.
 func download(ctx context.Context, f File, path string) error {
+	ctx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
 		return err
