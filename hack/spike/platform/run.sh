@@ -36,7 +36,7 @@ retry() { # seconds command...
 
 # guest <machine> <stage> [arg]: runs a guest.sh stage and records its metric lines.
 guest() {
-	local log="$OUT/guest-$2${3:+-$3}.log" rc=0
+	local log="$OUT/guest-$2${3:+-${3//[^a-z0-9]/-}}.log" rc=0
 	smolvm machine exec --name "$1" --stream --timeout 30m -- sh /root/guest.sh "${@:2}" | tee "$log" || rc=$?
 	sed -n 's/^metric|\(.*\)|\(.*\)$/| \1 | \2 |/p' "$log" >>"$METRICS"
 	return "$rc"
@@ -58,6 +58,8 @@ boot() {
 	metric "runner CPU" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
 	metric "smolvm" "$(smolvm --version)"
 	metric "host THP shmem_enabled" "$(cat /sys/kernel/mm/transparent_hugepage/shmem_enabled)"
+	metric "host swap" "$(free -m | awk '/^Swap:/ { print $2 " MiB" }')"
+	grep -H . /sys/module/kvm*/parameters/* 2>/dev/null || true
 	smolvm machine create --name $SRC --net --net-backend virtio-net --cpus 4 --mem 12288 --storage 40 --overlay 10
 	timed "first start of the bare VM (--branchable)" smolvm machine start --name $SRC --branchable
 	for f in guest.sh kind-mgmt.yaml kindnet-crs.yaml ../../../internal/devenv/platform/kindnet.yaml; do

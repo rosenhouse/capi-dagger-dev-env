@@ -19,11 +19,14 @@ jobs:
       matrix:
         # Huge pages back memfd guest RAM only when shmem_enabled allows them.
         shmem-thp: [never, always]
+        swap: [on, off]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - run: echo ${{ matrix.shmem-thp }} | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+      - if: matrix.swap == 'off'
+        run: sudo swapoff -a
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -58,7 +61,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: platform-shmem-thp-${{ matrix.shmem-thp }}
+          name: platform-shmem-thp-${{ matrix.shmem-thp }}-swap-${{ matrix.swap }}
           path: |
             ${{ runner.temp }}/platform/
             !${{ runner.temp }}/platform/bin/
