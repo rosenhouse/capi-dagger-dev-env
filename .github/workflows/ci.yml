@@ -25,15 +25,13 @@ jobs:
           go-version-file: go.mod
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -race ./...
       - run: go generate ./...
       - run: go mod tidy
       - run: test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
   smolvm:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      SMOLVM_IDLE_RECLAIM: "off"
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm
@@ -52,30 +50,142 @@ jobs:
             cp "$(smolvm machine data-dir --name "$m")/agent-console.log" "$RUNNER_TEMP/smolvm-logs/$m-agent-console.log" || true
           done
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smolvm-logs
           path: ${{ runner.temp }}/smolvm-logs
-  devenv:
+  # Only CI on smol publishes checkpoints, and only for AMD EPYC 7763, which runs about half of the jobs:
+  # each checkpoint takes about 3 GB of the repository's 10 GB cache, which main's CI shares.
+  # Runners land on random CPUs, so four jobs make one on a 7763 likely.
+  # A manual run on another branch tests this job without publishing.
+  platform:
+    if: github.event_name != 'pull_request'
+    permissions:
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Publish for this CPU?
+        id: cpu
+        run: |
+          if grep -q '^model name.*AMD EPYC 7763 ' /proc/cpuinfo; then publish=true; else publish=false; fi
+          echo "publish=$publish" | tee -a "$GITHUB_OUTPUT"
+      - if: steps.cpu.outputs.publish == 'true'
+        uses: ./.github/actions/smolvm
+        with:
+          version: ${{ env.SMOLVM_VERSION }}
+          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
+      - if: steps.cpu.outputs.publish == 'true'
+        uses: ./.github/actions/platform-cache
+        id: cache
+        with:
+          lookup-only: true
+          capture-on-miss: true
+      # Only a checkpoint that restores and passes the tests is published, as a published key is never replaced.
+      - name: devenv test --warm
+        id: verify
+        if: steps.cpu.outputs.publish == 'true' && steps.cache.outputs.hit != 'true'
+        timeout-minutes: 15
+        run: |
+          "$RUNNER_TEMP/devenv" test --warm --name verify 2>&1 | tee "$RUNNER_TEMP/verify.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/verify.log.seconds"
+      - if: steps.verify.outcome == 'success' && github.ref == 'refs/heads/smol'
+        run: echo "$EPOCHREALTIME" >"$RUNNER_TEMP/cache-save.start"
+      - if: steps.verify.outcome == 'success' && github.ref == 'refs/heads/smol'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/devenv/platform
+          key: ${{ steps.cache.outputs.key }}
+      - name: Delete superseded checkpoints
+        if: steps.verify.outcome == 'success' && github.ref == 'refs/heads/smol'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEY: ${{ steps.cache.outputs.key }}
+        run: |
+          gh cache list --ref "$GITHUB_REF" --key devenv-platform- --limit 100 --json id,key --jq ".[] | select(.key != \"$KEY\") | .id" |
+            while read -r id; do gh cache delete "$id"; done
+      - name: Summary
+        if: always() && steps.cpu.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEY: ${{ steps.cache.outputs.key }}
+        run: |
+          if [ -f "$RUNNER_TEMP/cache-save.start" ]; then
+            echo "| Cache save | $(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $(cat "$RUNNER_TEMP/cache-save.start") }") s |" >>"$RUNNER_TEMP/platform.md"
+            echo "| Cache entry | $(gh cache list --key "$KEY" --json sizeInBytes --jq '.[0].sizeInBytes // 0 | . / 1048576 | floor') MiB |" >>"$RUNNER_TEMP/platform.md"
+          fi
+          echo "| Repository cache | $(gh api "repos/$GH_REPO/actions/cache/usage" --jq '.active_caches_size_in_bytes / 1048576 | floor') MiB |" >>"$RUNNER_TEMP/platform.md"
+          {
+            cat "$RUNNER_TEMP/platform.md"
+            echo
+            echo "The repository's largest caches:"
+            gh cache list --sort size_in_bytes --limit 10 --json key,ref,sizeInBytes --jq '.[] | "- \(.sizeInBytes / 1048576 | floor) MiB, \(.ref): \(.key)"'
+            echo
+            .github/ci/timings.sh "save=$RUNNER_TEMP/save.log" "test --warm=$RUNNER_TEMP/verify.log"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: platform-save-${{ matrix.job }}
+          path: |
+            ~/.cache/devenv/platform-save/
+            .devenv/
+          include-hidden-files: true
+  # On smol, devenv and concurrent wait for platform, so that they restore what it published.
+  devenv:
+    needs: platform
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm
         with:
           version: ${{ env.SMOLVM_VERSION }}
           sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
-      - run: go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
+      - uses: ./.github/actions/platform-cache
+        with:
+          capture-on-miss: true
       - name: devenv test
         timeout-minutes: 15
         run: |
-          go run ./cmd/devenv test --name ci 2>&1 | tee "$RUNNER_TEMP/test.log"
-          echo "$SECONDS" >"$RUNNER_TEMP/test.seconds"
+          "$RUNNER_TEMP/devenv" test --warm --name ci 2>&1 | tee "$RUNNER_TEMP/test.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/test.log.seconds"
+      - name: Interrupt up while it restores its VM
+        timeout-minutes: 5
+        run: |
+          setsid "$RUNNER_TEMP/devenv" up --warm --name interrupted 2>"$RUNNER_TEMP/interrupt.log" & pid=$!
+          until pgrep -f -- '--from .*/restoring/' >/dev/null; do kill -0 "$pid"; sleep 0.1; done
+          # A terminal's Ctrl-C signals the whole process group.
+          kill -INT -- "-$pid"
+          status=0
+          wait "$pid" || status=$?
+          cat "$RUNNER_TEMP/interrupt.log"
+          test "$status" -ne 0
+          grep -q 'interrupted; devenv deletes the VM once smolvm has restored it' "$RUNNER_TEMP/interrupt.log"
+          grep -q 'interrupted; deleted the VM' "$RUNNER_TEMP/interrupt.log"
+          "$RUNNER_TEMP/devenv" down --name interrupted --purge
+          test -z "$(smolvm machine ls -q)"
+      - name: devenv test again
+        timeout-minutes: 15
+        run: |
+          "$RUNNER_TEMP/devenv" test --warm --name ci 2>&1 | tee "$RUNNER_TEMP/again.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/again.log.seconds"
       # This reuses the name, and runs each command as a developer would.
+      # Pruning smolvm's extracted checkpoint makes up extract it again, as the first test did, but without its cold build.
       - name: up, status, kubeconfig, redeploy and down
         timeout-minutes: 15
         run: |
-          go run ./cmd/devenv up --name ci 2>&1 | tee "$RUNNER_TEMP/up.log"
+          smolvm pack prune --all
+          go run ./cmd/devenv up --warm --name ci 2>&1 | tee "$RUNNER_TEMP/up.log"
           go run ./cmd/devenv status | tee "$RUNNER_TEMP/status.txt"
           grep -qE '^ci +running +[0-9]+ +[0-9]+ +[0-9]+ ' "$RUNNER_TEMP/status.txt"
           go run ./cmd/devenv kubeconfig --cluster workload >"$RUNNER_TEMP/workload.kubeconfig"
@@ -83,11 +193,50 @@ jobs:
           go run ./cmd/devenv redeploy --name ci --version ci-redeploy 2>&1 | tee "$RUNNER_TEMP/redeploy.log"
           go run ./cmd/devenv down --name ci --purge
           test ! -e .devenv/ci
+      - name: No VMs left
+        run: |
+          smolvm machine ls
+          test -z "$(smolvm machine ls -q)"
+          ! pgrep -af _boot-vm
+      - name: Summary
+        if: always()
+        run: |
+          {
+            cat "$RUNNER_TEMP/platform.md"
+            echo "| smolvm's extracted checkpoints after down | $(du -sm ~/.cache/smolvm/vms/_shared 2>/dev/null | cut -f1) MiB |"
+            echo "| Disk used after down | $(df --output=used -BG / | tail -1 | tr -d ' ') |"
+            echo
+            .github/ci/timings.sh "save=$RUNNER_TEMP/save.log" "test=$RUNNER_TEMP/test.log" "test again=$RUNNER_TEMP/again.log" \
+              "up=$RUNNER_TEMP/up.log" "redeploy=$RUNNER_TEMP/redeploy.log"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: devenv
+          path: |
+            .devenv/
+            ~/.cache/devenv/platform-save/
+          include-hidden-files: true
+  devenv-cold:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/smolvm
+        with:
+          version: ${{ env.SMOLVM_VERSION }}
+          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
+      - run: go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
+      - name: devenv test --cold
+        timeout-minutes: 15
+        run: |
+          "$RUNNER_TEMP/devenv" test --cold --name ci 2>&1 | tee "$RUNNER_TEMP/test.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/test.log.seconds"
       - name: Interrupt up while its VM starts
         timeout-minutes: 5
         run: |
-          setsid "$RUNNER_TEMP/devenv" up --name interrupted 2>"$RUNNER_TEMP/interrupt.log" & pid=$!
-          until smolvm machine ls -q | grep '^devenv-interrupted-' >/dev/null; do kill -0 "$pid"; sleep 0.1; done
+          setsid "$RUNNER_TEMP/devenv" up --cold --name interrupted 2>"$RUNNER_TEMP/interrupt.log" & pid=$!
+          until pgrep -f _boot-vm >/dev/null; do kill -0 "$pid"; sleep 0.1; done
           # A terminal's Ctrl-C signals the whole process group.
           kill -INT -- "-$pid"
           status=0
@@ -101,52 +250,40 @@ jobs:
           smolvm machine ls
           test -z "$(smolvm machine ls -q)"
           ! pgrep -af _boot-vm
-      - name: Stage timings
+      - name: Summary
         if: always()
         run: |
-          re='^\[ *([0-9.]+)s\] (.+): ([0-9.]+)s$'
-          # rows prints a table row for each stage in log $1. Rows after up's last stage belong to a redeploy.
-          rows() {
-            prefix=$2
-            while IFS= read -r line; do
-              [[ $line =~ $re ]] || continue
-              echo "| $prefix${BASH_REMATCH[2]} | ${BASH_REMATCH[3]} |"
-              if [ "${BASH_REMATCH[2]}" = "workload packages" ]; then
-                echo "| **up** | **${BASH_REMATCH[1]}** |"
-                prefix="redeploy: "
-              fi
-            done <"$1"
-          }
-          for run in test up redeploy; do
-            [ -f "$RUNNER_TEMP/$run.log" ] || continue
-            echo "### Stage timings, devenv $run"
-            echo "| Stage | Seconds |"
-            echo "| --- | ---: |"
-            rows "$RUNNER_TEMP/$run.log" "$([ $run = redeploy ] && echo 'redeploy: ')"
-            if [ $run = test ] && [ -f "$RUNNER_TEMP/test.seconds" ]; then echo "| **devenv test** | **$(cat "$RUNNER_TEMP/test.seconds")** |"; fi
-          done | tee -a "$GITHUB_STEP_SUMMARY"
-          grep -h 'container restarts' "$RUNNER_TEMP/test.log" | tee -a "$GITHUB_STEP_SUMMARY" || true
+          {
+            echo "| Runner | |"
+            echo "| --- | --- |"
+            echo "| CPU | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs) |"
+            echo
+            .github/ci/timings.sh "test --cold=$RUNNER_TEMP/test.log"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: devenv
+          name: devenv-cold
           path: .devenv/
           include-hidden-files: true
   concurrent:
+    needs: platform
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm
         with:
           version: ${{ env.SMOLVM_VERSION }}
           sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
-      - run: go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
+      - uses: ./.github/actions/platform-cache
+        with:
+          capture-on-miss: true
       - name: Two environments at once, one with a random name
         timeout-minutes: 30
         run: |
-          say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
-          say "### Two environments at once"
+          say() { echo "$*" >>"$RUNNER_TEMP/concurrent.md"; }
           say "Before: $(free -m | awk '/^Mem:/ { print $3 }') MiB of memory and $(df --output=used -BG / | tail -1 | tr -d ' ') of disk used."
           vms_rss() {
             for pid in $(smolvm machine ls --json | jq -r '.[].pid // empty'); do
@@ -158,18 +295,14 @@ jobs:
             echo "$(free -m | awk '/^Mem:/ { print $3 }') $(vms_rss) $(df --output=used -BG / | tail -1 | tr -d ' G')"
           done >"$RUNNER_TEMP/usage.log") & sampler=$!
           trap 'kill $sampler' EXIT
-          "$RUNNER_TEMP/devenv" test --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
-          "$RUNNER_TEMP/devenv" test 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
+          "$RUNNER_TEMP/devenv" test --warm --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
+          "$RUNNER_TEMP/devenv" test --warm 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
           status=0
           wait $a || status=1
           wait $r || status=1
           peak() { cut -d' ' -f"$1" "$RUNNER_TEMP/usage.log" | sort -n | tail -1; }
           say "Peak: $(peak 1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used, $(peak 2) MiB of it by the VMs;" \
             "$(peak 3) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk used."
-          for env in a random; do
-            say "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s;" \
-              "$(sed -nE 's/^\[[a-z]+\] \[ *[0-9.]+s\] (container restarts: .*)/\1/p' "$RUNNER_TEMP/$env.log")."
-          done
           say "Both tests took $SECONDS s."
           exit $status
       - run: test "$(ls .devenv)" = a
@@ -177,9 +310,22 @@ jobs:
         run: |
           test -z "$(smolvm machine ls -q)"
           ! pgrep -af _boot-vm
+      - name: Summary
+        if: always()
+        run: |
+          {
+            cat "$RUNNER_TEMP/platform.md"
+            echo
+            echo "### Two environments at once"
+            cat "$RUNNER_TEMP/concurrent.md" || true
+            echo
+            .github/ci/timings.sh "save=$RUNNER_TEMP/save.log" "a=$RUNNER_TEMP/a.log" "random=$RUNNER_TEMP/random.log"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: devenv-concurrent
-          path: .devenv/
+          path: |
+            .devenv/
+            ~/.cache/devenv/platform-save/
           include-hidden-files: true
