@@ -86,10 +86,14 @@ func (e Env) Running() (bool, error) {
 }
 
 // SocketPath is where the environment's up process listens for requests.
-// It lives in the temporary directory, under a hash of Dir, because Unix socket paths are short on macOS.
+// It is short, because macOS limits socket paths to 104 bytes, and outside TMPDIR, which macOS cleans.
 func (e Env) SocketPath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
 	dirHash := sha256.Sum256([]byte(e.Dir))
-	return filepath.Join(os.TempDir(), "devenv-"+hex.EncodeToString(dirHash[:8])+".sock")
+	return filepath.Join(dir, "devenv", hex.EncodeToString(dirHash[:8])+".sock")
 }
 
 // Kubeconfig returns the kubeconfig of the running environment's mgmt or workload cluster.
@@ -137,12 +141,20 @@ func List(root string) ([]Env, error) {
 // Existing returns the environment called name under root. If name is empty,
 // it returns the only environment there, or else the only running one.
 func Existing(root, name string) (Env, error) {
-	if name != "" {
-		return New(root, name)
-	}
 	envs, err := List(root)
 	if err != nil {
 		return Env{}, err
+	}
+	if name != "" {
+		for _, env := range envs {
+			if env.Name == name {
+				return env, nil
+			}
+		}
+		return Env{}, fmt.Errorf("no environment %s in %s", name, root)
+	}
+	if len(envs) == 0 {
+		return Env{}, fmt.Errorf("no environments in %s", root)
 	}
 	if len(envs) == 1 {
 		return envs[0], nil

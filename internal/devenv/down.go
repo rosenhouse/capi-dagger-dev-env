@@ -41,13 +41,13 @@ func Down(ctx context.Context, env state.Env, out io.Writer) error {
 	})
 }
 
-// Purge deletes a stopped environment's Docker data and state.
+// Purge deletes a stopped environment's Docker data, state and socket. It holds the environment while it does.
 func Purge(ctx context.Context, env state.Env) error {
-	if running, err := env.Running(); err != nil {
+	unlock, err := env.Lock()
+	if err != nil {
 		return err
-	} else if running {
-		return fmt.Errorf("environment %s is running", env.Name)
 	}
+	defer unlock()
 	c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
 	if err != nil {
 		return err
@@ -55,6 +55,9 @@ func Purge(ctx context.Context, env state.Env) error {
 	defer c.Close()
 	if err := infra.Purge(ctx, c, env.ID); err != nil {
 		return fmt.Errorf("purge Docker data: %w", err)
+	}
+	if err := os.Remove(env.SocketPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return os.RemoveAll(env.Dir)
 }

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"dagger.io/dagger"
@@ -45,14 +46,16 @@ type Environment struct {
 	// Packages are rendered Package resources for the first-party bundles in the session registry.
 	Packages [][]byte
 
-	opts     Options
-	start    time.Time
-	ctx      context.Context
-	cancel   context.CancelFunc
-	infra    *infra.Infra
-	registry *infra.Registry
-	mirrors  infra.Mirrors
-	closers  []func() error
+	opts   Options
+	start  time.Time
+	ctx    context.Context
+	cancel context.CancelFunc
+	// stopServing stops the control socket after its requests in flight.
+	stopServing func() error
+	infra       *infra.Infra
+	registry    *infra.Registry
+	mirrors     infra.Mirrors
+	closers     []func() error
 }
 
 // Up brings up an environment and waits for its readiness gates.
@@ -79,18 +82,31 @@ func start(ctx context.Context, o Options) (*Environment, error) {
 	if err != nil {
 		return nil, err
 	}
+	stale, _ := filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
+	for _, path := range stale {
+		if err := os.Remove(path); err != nil {
+			unlock()
+			return nil, err
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	e := &Environment{Env: env, opts: o, start: time.Now(), ctx: ctx, cancel: cancel,
 		closers: []func() error{func() error { cancel(); unlock(); return nil }}}
 	listening, served := make(chan struct{}), make(chan error, 1)
-	go func() { served <- control.Serve(ctx, env.SocketPath(), e.handlers(), func() { close(listening) }) }()
+	go func() {
+		err := control.Serve(ctx, env.SocketPath(), e.handlers(), func() { close(listening) })
+		if err != nil {
+			cancel()
+		}
+		served <- err
+	}()
 	select {
 	case <-listening:
 	case err := <-served:
 		e.Close()
 		return nil, fmt.Errorf("control socket: %w", err)
 	}
-	e.closers = append([]func() error{func() error { cancel(); return <-served }}, e.closers...)
+	e.stopServing = sync.OnceValue(func() error { cancel(); return <-served })
 	return e, nil
 }
 
@@ -433,6 +449,9 @@ func missingMirroredRepos(catalogs map[string]string, want map[string][]string) 
 func (e *Environment) Close() error {
 	e.progress("tearing down")
 	var errs []error
+	if e.stopServing != nil {
+		errs = append(errs, e.stopServing())
+	}
 	for _, closer := range e.closers {
 		errs = append(errs, closer())
 	}

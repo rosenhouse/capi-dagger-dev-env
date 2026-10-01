@@ -166,14 +166,19 @@ func TestRunningWhileLocked(t *testing.T) {
 	}
 }
 
-func TestSocketPathFitsMacOSLimitForLongNames(t *testing.T) {
+func TestSocketPathIsShortAndUnique(t *testing.T) {
+	t.Setenv("HOME", "/Users/a-rather-long-user-name")
+	t.Setenv("XDG_CACHE_HOME", "")
 	a := newEnv(t, t.TempDir(), strings.Repeat("a", 63))
 	b := newEnv(t, t.TempDir(), strings.Repeat("a", 63))
-	if len(a.SocketPath()) > len(os.TempDir())+40 {
-		t.Errorf("SocketPath() = %s is too long", a.SocketPath())
+	if len(a.SocketPath()) > 100 {
+		t.Errorf("SocketPath() = %s is longer than macOS allows", a.SocketPath())
 	}
 	if a.SocketPath() == b.SocketPath() {
 		t.Error("environments in different state dirs share a socket")
+	}
+	if strings.HasPrefix(a.SocketPath(), os.TempDir()) {
+		t.Errorf("SocketPath() = %s is in the temporary directory, which macOS cleans", a.SocketPath())
 	}
 }
 
@@ -206,8 +211,8 @@ func TestListOfMissingRootIsEmpty(t *testing.T) {
 
 func TestExistingPicksTheOnlyEnvironmentWhenNameIsEmpty(t *testing.T) {
 	root := t.TempDir()
-	if _, err := state.Existing(root, ""); err == nil {
-		t.Error("no error without environments")
+	if _, err := state.Existing(root, ""); err == nil || !strings.Contains(err.Error(), "no environments in") {
+		t.Errorf("no environments: err = %v", err)
 	}
 	_ = os.MkdirAll(filepath.Join(root, "alpha"), 0o700)
 	if env, err := state.Existing(root, ""); err != nil || env.Name != "alpha" {
@@ -242,14 +247,14 @@ func TestExistingPicksTheOnlyRunningEnvironmentWhenNameIsEmpty(t *testing.T) {
 	}
 }
 
-func TestExistingWithANameNeedsNoStateDir(t *testing.T) {
+func TestExistingFindsANamedEnvironment(t *testing.T) {
 	root := t.TempDir()
-	env, err := state.Existing(root, "gamma")
-	if err != nil || env != newEnv(t, root, "gamma") {
-		t.Errorf("Existing(gamma) = %+v, %v", env, err)
+	_ = os.MkdirAll(filepath.Join(root, "beta"), 0o700)
+	if env, err := state.Existing(root, "beta"); err != nil || env != newEnv(t, root, "beta") {
+		t.Errorf("Existing(beta) = %+v, %v", env, err)
 	}
-	if _, err := state.Existing(root, "Not_A_Name"); err == nil {
-		t.Error("no error for an invalid name")
+	if _, err := state.Existing(root, "gamma"); err == nil || !strings.Contains(err.Error(), "no environment gamma") {
+		t.Errorf("Existing(gamma): err = %v", err)
 	}
 }
 

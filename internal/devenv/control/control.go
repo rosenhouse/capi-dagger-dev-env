@@ -13,10 +13,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 // Handler acts on one request, writing progress as lines. Its ctx ends when the client leaves.
@@ -25,11 +25,15 @@ type Handler func(ctx context.Context, args []string, progress io.Writer) error
 // Serve handles requests concurrently until ctx is done, then waits for the ones in flight.
 // It calls listening once the socket accepts connections.
 func Serve(ctx context.Context, path string, handlers map[string]Handler, listening func()) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	_ = os.Remove(path)
 	l, err := net.Listen("unix", path)
 	if err != nil {
 		return err
 	}
+	defer l.Close()
 	go func() {
 		<-ctx.Done()
 		l.Close()
@@ -53,12 +57,12 @@ func Serve(ctx context.Context, path string, handlers map[string]Handler, listen
 }
 
 func handle(ctx context.Context, conn net.Conn, handlers map[string]Handler) {
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Stopping the server abandons a client that has not sent its command yet.
+	abandon := context.AfterFunc(ctx, func() { conn.Close() })
 	line, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
+	if !abandon() || err != nil {
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
