@@ -157,7 +157,7 @@ func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return e.platform(gctx, leftover) })
 	g.Go(func() error {
-		return e.stage("build images and bundles", func() (err error) { b, err = e.build(gctx, ""); return err })
+		return e.stage("build images", func() (err error) { b, err = e.build(gctx, ""); return err })
 	})
 	if err := g.Wait(); err != nil {
 		return err

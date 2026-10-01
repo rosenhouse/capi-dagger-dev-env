@@ -181,8 +181,8 @@ func (v *VM) Install(ctx context.Context) error {
 apk add --quiet --no-network --allow-untrusted /opt/devenv/apk/*.apk`)
 }
 
-// StartDocker starts dockerd with its data on the VM's storage disk. Without --storage-driver,
-// Docker 29 would use the containerd snapshotter, which Kind's nested containerd cannot run on.
+// StartDocker starts dockerd with its data on the VM's storage disk, because overlay2 cannot nest on the root overlay.
+// Without --storage-driver, a fresh Docker 29 would use the containerd image store instead of overlay2.
 func (v *VM) StartDocker(ctx context.Context) error {
 	if err := v.Run(ctx, `mkdir -p /storage/docker /var/lib/docker /storage/containerd /var/lib/containerd /lib/modules `+ContainerdCertsDir+`
 mountpoint -q /var/lib/docker || mount --bind /storage/docker /var/lib/docker

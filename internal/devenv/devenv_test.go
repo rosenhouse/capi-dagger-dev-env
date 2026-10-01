@@ -118,6 +118,33 @@ func TestUpRefusesAnEnvironmentWhoseVMIsRunning(t *testing.T) {
 	}
 }
 
+func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
+	o, env, calls := fakeSmolvm(t, vm(smolvm.Stopped))
+	e, err := open(env, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	if err := e.createVM(t.Context(), smolvm.Stopped); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := env.Ports()
+	if err != nil || p != e.Ports {
+		t.Fatalf("recorded ports %+v, %v; want %+v", p, err, e.Ports)
+	}
+	got := calls()
+	if len(got) != 3 || got[0] != "machine delete --name "+env.VM()+" -f" || !strings.HasPrefix(got[2], "machine start --name "+env.VM()) {
+		t.Fatalf("smolvm calls = %q; want delete, create and start", got)
+	}
+	for _, publish := range []string{fmt.Sprintf("-p %d:6443", p.MgmtAPI), fmt.Sprintf("-p %d:7443", p.WorkloadAPI), fmt.Sprintf("-p %d:5000", p.Registry)} {
+		if !strings.Contains(got[1], publish) {
+			t.Errorf("%q does not publish %q", got[1], publish)
+		}
+	}
+}
+
 func TestDownDeletesTheVMAndKubeconfigs(t *testing.T) {
 	o, env, calls := fakeSmolvm(t, vm(smolvm.Running))
 	writeKubeconfigs(t, env)
