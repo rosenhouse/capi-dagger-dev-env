@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/e2e"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
 func main() {
@@ -61,6 +65,67 @@ func main() {
 			return nil
 		},
 	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "List environments and whether each is running",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			envs, err := state.List(o.StateDir)
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tSTATE\tKUBECONFIGS")
+			for _, env := range envs {
+				pid, err := env.Holder()
+				if err != nil {
+					return err
+				}
+				status := "stopped"
+				if pid != 0 {
+					status = fmt.Sprintf("running (pid %d)", pid)
+				}
+				kubeconfigs, _ := filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
+				fmt.Fprintf(w, "%s\t%s\t%s\n", env.Name, status, strings.Join(kubeconfigs, " "))
+			}
+			return w.Flush()
+		},
+	})
+	var cluster string
+	kubeconfigCmd := &cobra.Command{
+		Use:   "kubeconfig",
+		Short: "Print an environment's kubeconfig",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			env, err := state.Existing(o.StateDir, o.Name)
+			if err != nil {
+				return err
+			}
+			kubeconfig, err := os.ReadFile(filepath.Join(env.Dir, cluster+".kubeconfig"))
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("environment %s has no %s kubeconfig; is it up?", env.Name, cluster)
+			}
+			if err != nil {
+				return err
+			}
+			_, err = os.Stdout.Write(kubeconfig)
+			return err
+		},
+	}
+	kubeconfigCmd.Flags().StringVar(&cluster, "cluster", "mgmt", "mgmt or workload")
+	root.AddCommand(kubeconfigCmd)
+	var purge bool
+	downCmd := &cobra.Command{
+		Use:   "down",
+		Short: "Stop a running environment",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return devenv.Down(cmd.Context(), o, purge)
+		},
+	}
+	downCmd.Flags().BoolVar(&purge, "purge", false, "also delete the environment's cached Docker data and state")
+	root.AddCommand(downCmd)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

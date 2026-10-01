@@ -216,3 +216,14 @@ func tail(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// Purge deletes an environment's Docker data. It lives in a cache volume, which the Dagger API cannot delete.
+func Purge(ctx context.Context, c *dagger.Client, envID string) error {
+	_, err := c.Container().From(dindImage).
+		With(InSession).
+		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+envID+"-docker"),
+			dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeLocked}).
+		WithExec([]string{"sh", "-c", "rm -rf /var/lib/docker/* /var/lib/docker/.[!.]*"}).
+		Sync(ctx)
+	return err
+}
