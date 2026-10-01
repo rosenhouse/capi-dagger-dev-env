@@ -32,9 +32,10 @@ const (
 	registryIP = "172.31.255.254"
 
 	// Digests avoid a registry round trip, and its rate limit, when the image is cached.
-	registryImage = "registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
-	socatImage    = "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
-	kindNodeImage = "kindest/node:" + KubernetesVersion + "@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+	registryImage  = "registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
+	socatImage     = "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
+	kindNodeDigest = "sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+	kindNodeImage  = "kindest/node:" + KubernetesVersion + "@" + kindNodeDigest
 )
 
 // machineConfig sizes each environment's VM. Two fit on a 16 GB host.
@@ -235,8 +236,10 @@ nodes:
 
 // CreateManagementCluster creates the Kind management cluster and returns its kubeconfig.
 // Later guest commands use the cluster as kubectl's default.
+// CAPD's nodes ask for the node image by tag, so tagging the pinned image saves them a pull.
 func (v *VM) CreateManagementCluster(ctx context.Context) ([]byte, error) {
-	if err := v.Run(ctx, fmt.Sprintf("kind create cluster --name mgmt --image %s --config - <<'EOF'\n%sEOF", kindNodeImage, mgmtKindConfig)); err != nil {
+	if err := v.Run(ctx, fmt.Sprintf("kind create cluster --name mgmt --image %s --config - <<'EOF'\n%sEOF\ndocker tag kindest/node@%s kindest/node:%s",
+		kindNodeImage, mgmtKindConfig, kindNodeDigest, KubernetesVersion)); err != nil {
 		return nil, err
 	}
 	out, err := v.Output(ctx, "kind get kubeconfig --name mgmt")
