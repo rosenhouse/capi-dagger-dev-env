@@ -41,7 +41,12 @@ func (e *Environment) platform(ctx context.Context, leftover smolvm.State, start
 		if listErr != nil {
 			return errors.Join(err, listErr)
 		}
-		leftover = e.VMState(machines)
+		if leftover = e.VMState(machines); leftover != "" {
+			logs := filepath.Join(e.Dir, "logs", "restore")
+			if logErr := e.vm.ExportConsoleLog(ctx, logs); logErr == nil {
+				err = fmt.Errorf("%w\nlogs: %s", err, logs)
+			}
+		}
 	}
 	e.progress(fmt.Sprintf("platform: cold start, because %v", err))
 	return e.coldPlatform(ctx, leftover, started)

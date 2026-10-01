@@ -25,7 +25,9 @@ jobs:
             pgrep -af _boot-vm || true
             d=$(smolvm machine data-dir --name "$1")
             ls -la "$d" || true
-            tail -c 3000 "$d/agent-console.log" || true
+            echo "--- agent-startup-error.log"; cat "$d/agent-startup-error.log" || true
+            echo "--- agent-console.log"; tail -c 12000 "$d/agent-console.log" || true
+            echo "--- host dmesg"; sudo dmesg | tail -30
             echo
           }
           variant() { # name proxy remove
@@ -41,10 +43,11 @@ jobs:
               smolvm machine update --name "$dst" -p 26443:6443 -p 27443:7443 -p 25000:5000
             fi
             t0=$SECONDS
-            SMOLVM_IDLE_RECLAIM=off smolvm "${start[@]}" --name "$dst"
+            SMOLVM_BOOT_DEBUG=1 RUST_LOG=smolvm=debug SMOLVM_IDLE_RECLAIM=off smolvm "${start[@]}" --name "$dst" 2>&1 | tail -60
             echo "start took $((SECONDS - t0)) s"
             ok=no
-            for i in $(seq 1 24); do
+            sleep 2; smolvm machine ls
+            for i in $(seq 1 6); do
               if RUST_LOG=smolvm=debug smolvm machine exec --name "$dst" -- uptime 2>"$RUNNER_TEMP/exec.err"; then ok="yes after $((SECONDS - t0)) s"; break; fi
               echo "exec $i failed at $((SECONDS - t0)) s:"; tail -5 "$RUNNER_TEMP/exec.err"
               [ "$i" = 1 ] && diag "$dst"
@@ -58,4 +61,3 @@ jobs:
           echo "| variant | exec |" >>"$GITHUB_STEP_SUMMARY"
           echo "| --- | --- |" >>"$GITHUB_STEP_SUMMARY"
           variant ours yes yes
-          variant spike no no

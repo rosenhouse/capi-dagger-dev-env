@@ -18,11 +18,16 @@ func (v *VM) ExportLogs(ctx context.Context, dir, cluster, namespace string) err
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	return errors.Join(v.ExportConsoleLog(ctx, dir), v.exportGuestLogs(ctx, dir, cluster, namespace))
+}
+
+// ExportConsoleLog writes smolvm's console log of the VM to dir on the host.
+func (v *VM) ExportConsoleLog(ctx context.Context, dir string) error {
 	data, err := v.CLI.DataDir(ctx, v.Name)
-	if err == nil {
-		err = copyFile(filepath.Join(data, "agent-console.log"), filepath.Join(dir, "agent-console.log"))
+	if err != nil {
+		return err
 	}
-	return errors.Join(err, v.exportGuestLogs(ctx, dir, cluster, namespace))
+	return copyFile(filepath.Join(data, "agent-console.log"), filepath.Join(dir, "agent-console.log"))
 }
 
 // collectLogs writes logs to the current directory. With "api", it writes what the API servers say, cheapest first,

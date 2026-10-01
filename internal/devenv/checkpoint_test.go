@@ -220,6 +220,9 @@ func TestUpStartsColdWhenTheRestoreFails(t *testing.T) {
 			if want := "] platform: cold start, because restoring it failed: "; !strings.Contains(progress.String(), want) {
 				t.Errorf("progress = %q; want %q", progress.String(), want)
 			}
+			if fail == "machine start --name %s" && !slices.Contains(got[failed:cold], "machine data-dir --name "+f.env.VM()) {
+				t.Errorf("smolvm calls = %q; want the restored VM's console log kept", got)
+			}
 		})
 	}
 }
