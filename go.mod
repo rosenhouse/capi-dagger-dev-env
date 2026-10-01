@@ -3,7 +3,7 @@ module github.com/rosenhouse/capi-dagger-dev-env
 go 1.26.1
 
 require (
-	dagger.io/dagger v0.21.10
+	dagger.io/dagger v1.0.0-beta.15
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.22.0
 	k8s.io/api v0.36.3
