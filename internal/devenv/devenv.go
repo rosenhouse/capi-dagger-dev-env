@@ -2,32 +2,21 @@
 package devenv
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sync"
 	"time"
 
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"golang.org/x/sync/errgroup"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/fetch"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/hostbuild"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/oci"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
@@ -60,17 +49,13 @@ type Environment struct {
 	closers  []func() error
 }
 
-// open holds env and opens its guest log, truncated if fresh.
-func open(env state.Env, o Options, fresh bool) (*Environment, error) {
+// open holds env and opens its guest log.
+func open(env state.Env, o Options) (*Environment, error) {
 	unlock, err := env.Lock()
 	if err != nil {
 		return nil, err
 	}
-	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
-	if fresh {
-		flags |= os.O_TRUNC
-	}
-	logFile, err := os.OpenFile(filepath.Join(env.Dir, "guest.log"), flags, 0o600)
+	logFile, err := os.OpenFile(filepath.Join(env.Dir, "guest.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		unlock()
 		return nil, err
@@ -102,7 +87,7 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	if err != nil {
 		return nil, err
 	}
-	e, err := open(env, o, true)
+	e, err := open(env, o)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +148,7 @@ func (e *Environment) forget() error {
 			return err
 		}
 	}
-	return nil
+	return os.Truncate(filepath.Join(e.Dir, "guest.log"), 0)
 }
 
 // bringUp brings up the platform while it builds the first-party images, then installs them.
@@ -180,10 +165,6 @@ func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error 
 	return e.firstParty(ctx, b)
 }
 
-// apiAttempt bounds each check of a gate that calls an API server through a published port,
-// because smolvm accepts a connection before anything in the guest answers it.
-const apiAttempt = 30 * time.Second
-
 // The workload Cluster's name and namespace in the management cluster.
 const (
 	WorkloadCluster   = "work"
@@ -191,368 +172,6 @@ const (
 	// remotePackageInstall is the name addon-manager gives greeting-controller's PackageInstall.
 	remotePackageInstall = WorkloadCluster + "-greeting-controller"
 )
-
-// platform brings up the VM and everything in it that holds no first-party code: dockerd, the session registry,
-// the management cluster with kapp-controller, CAPI and CAPD, and the workload cluster.
-func (e *Environment) platform(ctx context.Context, leftover smolvm.State) error {
-	cache := fetch.Cache{Dir: filepath.Join(e.cacheDir, "downloads")}
-	downloads, err := infra.Downloads(runtime.GOARCH)
-	if err != nil {
-		return err
-	}
-	downloads = append(downloads, platform.Downloads()...)
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.stage("VM", func() error { return e.createVM(gctx, leftover) }) })
-	g.Go(func() error {
-		return e.stage("downloads", func() error {
-			g, ctx := errgroup.WithContext(gctx)
-			for _, d := range downloads {
-				g.Go(func() error { _, err := cache.Get(ctx, d.File); return err })
-			}
-			return g.Wait()
-		})
-	})
-	if err := g.Wait(); err != nil {
-		return err
-	}
-	if err := e.stage("guest tools", func() error {
-		if err := e.vm.Copy(ctx, cache, downloads); err != nil {
-			return err
-		}
-		return e.vm.Install(ctx)
-	}); err != nil {
-		return err
-	}
-	if err := e.stage("docker daemon", func() error { return e.vm.StartDocker(ctx) }); err != nil {
-		return err
-	}
-	if err := e.stage("registry", e.startRegistry(ctx)); err != nil {
-		return err
-	}
-	if err := e.stage("management cluster", e.managementCluster(ctx)); err != nil {
-		return err
-	}
-	g, gctx = errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return e.stage("kapp-controller", func() error { return platform.InstallKappController(gctx, e.vm) })
-	})
-	g.Go(func() error {
-		return e.stage("cluster api", func() error { return platform.InstallClusterAPI(gctx, e.vm) })
-	})
-	if err := g.Wait(); err != nil {
-		return err
-	}
-	if err := e.stage("workload cluster", e.workloadCluster(ctx)); err != nil {
-		return err
-	}
-	return e.stage("workload API", e.workloadAPI(ctx))
-}
-
-// createVM deletes a VM that an earlier run left, then creates the environment's VM on free host ports.
-func (e *Environment) createVM(ctx context.Context, leftover smolvm.State) error {
-	if leftover != "" {
-		if err := e.vm.Delete(ctx); err != nil {
-			return err
-		}
-	}
-	ports, err := state.FreePorts()
-	if err != nil {
-		return err
-	}
-	if err := e.WritePorts(ports); err != nil {
-		return err
-	}
-	e.Ports = ports
-	return e.vm.Create(ctx, ports)
-}
-
-func (e *Environment) startRegistry(ctx context.Context) func() error {
-	return func() error {
-		if err := e.vm.StartRegistry(ctx); err != nil {
-			return err
-		}
-		url := fmt.Sprintf("http://localhost:%d/v2/", e.Ports.Registry)
-		return ready.Wait(ctx, ready.Gate{
-			Name: "registry answers from host", Timeout: time.Minute, Interval: time.Second, Attempt: 5 * time.Second,
-			Check: func(ctx context.Context) error { return get(ctx, url) },
-		})
-	}
-}
-
-func get(ctx context.Context, url string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-	return nil
-}
-
-func (e *Environment) managementCluster(ctx context.Context) func() error {
-	return func() error {
-		kubeconfig, err := e.vm.CreateManagementCluster(ctx)
-		if err != nil {
-			return err
-		}
-		if _, err := e.WriteKubeconfig("mgmt", kubeconfig, e.Ports.MgmtAPI); err != nil {
-			return err
-		}
-		cs, err := kube.Client(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
-		})
-	}
-}
-
-func (e *Environment) workloadCluster(ctx context.Context) func() error {
-	return func() error {
-		if err := platform.CreateWorkloadCluster(ctx, e.vm, WorkloadCluster, WorkloadNamespace); err != nil {
-			return err
-		}
-		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error {
-				return kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster)
-			},
-		})
-	}
-}
-
-// workloadAPI publishes the workload API server to the host and writes its kubeconfig.
-func (e *Environment) workloadAPI(ctx context.Context) func() error {
-	return func() error {
-		if err := e.vm.ForwardWorkloadAPI(ctx, WorkloadCluster); err != nil {
-			return err
-		}
-		mgmt, err := kube.Client(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		secret, err := mgmt.CoreV1().Secrets(WorkloadNamespace).Get(ctx, WorkloadCluster+"-kubeconfig", metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if _, err := e.WriteKubeconfig("workload", secret.Data["value"], e.Ports.WorkloadAPI); err != nil {
-			return err
-		}
-		workload, err := kube.Client(e.WorkloadKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "workload nodes Ready from host", Timeout: 2 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, workload) },
-		})
-	}
-}
-
-// firstParty pushes the first-party images and bundles, installs the management packages,
-// and waits for addon-manager to install greeting-controller into the workload cluster.
-func (e *Environment) firstParty(ctx context.Context, b build) error {
-	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
-		return err
-	}
-	if err := e.stage("management packages", func() error { return e.installPackages(ctx) }); err != nil {
-		return err
-	}
-	return e.stage("workload packages", func() error {
-		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error {
-				return kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall)
-			},
-		})
-	})
-}
-
-const (
-	packageVersion = "0.1.0"
-	baseImage      = "gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3"
-)
-
-// packages lists the first-party bundles, the images each one locks, and whether it runs on the management cluster.
-var packages = []struct {
-	name   string
-	images []string
-	mgmt   bool
-}{
-	{"addon-manager", []string{"addon-manager"}, true},
-	{"greeting-syncer", []string{"greeting-syncer"}, true},
-	{"greeting-controller", []string{"greeting-controller", "hello"}, false},
-}
-
-func refName(pkg string) string { return pkg + ".demo.example.com" }
-
-// build is the first-party images and package manifests from one snapshot of the source.
-type build struct {
-	images map[string]v1.Image
-	config map[string]map[string][]byte
-}
-
-// build builds images from the current source, stamped with version, or with a digest of the source if version is empty.
-func (e *Environment) build(ctx context.Context, version string) (build, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return build{}, err
-	}
-	root, err := hostbuild.ModuleRoot(wd)
-	if err != nil {
-		return build{}, err
-	}
-	out, err := os.MkdirTemp("", "devenv-build-")
-	if err != nil {
-		return build{}, err
-	}
-	defer os.RemoveAll(out)
-	snap, err := hostbuild.Build(ctx, root, runtime.GOARCH, version, out)
-	if err != nil {
-		return build{}, err
-	}
-	base, err := oci.Base(ctx, baseImage, v1.Platform{OS: "linux", Architecture: runtime.GOARCH}, filepath.Join(e.cacheDir, "images"))
-	if err != nil {
-		return build{}, err
-	}
-	b := build{images: map[string]v1.Image{}, config: snap.Config}
-	for _, name := range hostbuild.Commands {
-		bin, err := os.ReadFile(filepath.Join(out, name))
-		if err != nil {
-			return build{}, err
-		}
-		if b.images[name], err = oci.Image(base, name, bin); err != nil {
-			return build{}, err
-		}
-	}
-	return b, nil
-}
-
-// push pushes b through the registry's host port, and renders Packages that pull the bundles from inside the clusters.
-func (e *Environment) push(ctx context.Context, b build) error {
-	host := fmt.Sprintf("localhost:%d/", e.Ports.Registry)
-	refs := map[string]string{}
-	for name, img := range b.images {
-		digest, err := oci.Push(ctx, img, host+name)
-		if err != nil {
-			return fmt.Errorf("push %s: %w", name, err)
-		}
-		refs[name] = infra.Registry + "/" + name + "@" + digest.String()
-	}
-	var pkgs [][]byte
-	bundles := map[string]string{}
-	for _, p := range packages {
-		images, err := subset(refs, p.images)
-		if err != nil {
-			return fmt.Errorf("package %s: %w", p.name, err)
-		}
-		lock, err := bundle.ImagesLock(images)
-		if err != nil {
-			return err
-		}
-		config, ok := b.config[p.name]
-		if !ok {
-			return fmt.Errorf("package %s has no config/%s", p.name, p.name)
-		}
-		img, err := oci.Bundle(config, lock)
-		if err != nil {
-			return err
-		}
-		digest, err := oci.Push(ctx, img, host+"bundles/"+p.name)
-		if err != nil {
-			return fmt.Errorf("push bundle %s: %w", p.name, err)
-		}
-		ref := infra.Registry + "/bundles/" + p.name + "@" + digest.String()
-		pkg, err := bundle.Package(refName(p.name), packageVersion, ref)
-		if err != nil {
-			return err
-		}
-		pkgs = append(pkgs, pkg)
-		bundles[p.name] = ref
-	}
-	e.Packages, e.bundles = pkgs, bundles
-	return nil
-}
-
-// installerManifests let kapp-controller install the management packages with cluster-admin.
-const installerManifests = `apiVersion: v1
-kind: Namespace
-metadata:
-  name: devenv
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: devenv-installer
-  namespace: devenv
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: devenv-installer
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-- kind: ServiceAccount
-  name: devenv-installer
-  namespace: devenv
-`
-
-func (e *Environment) installPackages(ctx context.Context) error {
-	manifests := [][]byte{[]byte(installerManifests)}
-	manifests = append(manifests, e.Packages...)
-	for _, p := range packages {
-		if !p.mgmt {
-			continue
-		}
-		pkgi, err := bundle.PackageInstall(refName(p.name), packageVersion, "devenv", "devenv-installer")
-		if err != nil {
-			return err
-		}
-		manifests = append(manifests, pkgi)
-	}
-	if err := platform.Apply(ctx, e.vm, bytes.Join(manifests, []byte("---\n"))); err != nil {
-		return err
-	}
-	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
-	if err != nil {
-		return err
-	}
-	return ready.Wait(ctx, ready.Gate{
-		Name: "PackageInstalls reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: apiAttempt,
-		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, "devenv") },
-	})
-}
-
-func subset(m map[string]string, keys []string) (map[string]string, error) {
-	out := map[string]string{}
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok {
-			return nil, fmt.Errorf("no image %q", k)
-		}
-		out[k] = v
-	}
-	return out, nil
-}
 
 // Open holds the environment called o.Name, or the only running one. Its VM must be running.
 func Open(ctx context.Context, o Options) (*Environment, error) {
@@ -564,7 +183,7 @@ func Open(ctx context.Context, o Options) (*Environment, error) {
 	if err != nil {
 		return nil, err
 	}
-	e, err := open(env, o, false)
+	e, err := open(env, o)
 	if err != nil {
 		return nil, err
 	}
@@ -578,48 +197,6 @@ func Open(ctx context.Context, o Options) (*Environment, error) {
 		return nil, errors.Join(err, e.Close())
 	}
 	return e, nil
-}
-
-// validVersion matches versions that -ldflags can stamp, or none.
-var validVersion = regexp.MustCompile(`^[A-Za-z0-9._+-]*$`)
-
-// Redeploy rebuilds images and bundles from the current source and waits for every package,
-// in both clusters, to deploy its new bundle. An empty version names the build by its source.
-func (e *Environment) Redeploy(ctx context.Context, version string) error {
-	if !validVersion.MatchString(version) {
-		return fmt.Errorf("version %q is not letters, digits and ._+-", version)
-	}
-	var b build
-	if err := e.stage("build images and bundles", func() (err error) { b, err = e.build(ctx, version); return err }); err != nil {
-		return err
-	}
-	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
-		return err
-	}
-	return e.stage("redeploy packages", func() error {
-		if err := platform.Reapply(ctx, e.vm, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
-			return err
-		}
-		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		for _, p := range packages {
-			namespace, app := "devenv", p.name
-			if !p.mgmt {
-				namespace, app = WorkloadNamespace, remotePackageInstall
-			}
-			if err := ready.Wait(ctx, ready.Gate{
-				Name: fmt.Sprintf("App %s/%s deployed", namespace, app), Timeout: 5 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
-				Check: func(ctx context.Context) error {
-					return kube.AppDeployed(ctx, dyn, namespace, app, e.bundles[p.name])
-				},
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 // Verify checks the environment from the host through its kubeconfigs.
