@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,8 @@ func (c CLI) RebindPorts(ctx context.Context, name string, remove, add []Port) e
 type StartOptions struct {
 	// Branchable lets the machine be branched and checkpointed. A machine created from a checkpoint is branchable without it.
 	Branchable bool
+	// NoIdleReclaim stops smolvm from squeezing the guest's memory to a fifth for a moment after ten idle minutes.
+	NoIdleReclaim bool
 }
 
 // Start boots a machine, or resumes a machine created from a checkpoint.
@@ -65,6 +68,9 @@ func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
 	args := []string{"machine", "start", "--name", name, "--proxy", ""}
 	if opts.Branchable {
 		args = append(args, "--branchable")
+	}
+	if opts.NoIdleReclaim {
+		c.env = append(slices.Clip(c.env), "SMOLVM_IDLE_RECLAIM=off")
 	}
 	err := c.do(context.WithoutCancel(ctx), args...)
 	if ctx.Err() != nil {

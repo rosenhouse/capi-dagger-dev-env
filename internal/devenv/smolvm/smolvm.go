@@ -25,6 +25,8 @@ const installHint = "Install smolvm " + Version + " with: curl -fsSL https://raw
 type CLI struct {
 	// Path is the smolvm executable.
 	Path string
+	// env holds KEY=VALUE pairs to add to smolvm's environment.
+	env []string
 }
 
 // ExitError reports a smolvm command that exited nonzero.
@@ -63,6 +65,9 @@ func (c CLI) run(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	cmd := exec.CommandContext(ctx, cmp.Or(c.Path, "smolvm"), args...)
 	// A terminal's Ctrl-C reaches only devenv, which decides what to cancel.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if len(c.env) > 0 {
+		cmd.Env = append(os.Environ(), c.env...)
+	}
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = waitDelay
 	var tail tail

@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 			signal.Ignore(os.Interrupt)
 		}
 		stdin, _ := io.ReadAll(os.Stdin)
-		call, _ := json.Marshal(fakeCall{Args: os.Args[1:], Stdin: string(stdin), Pgid: syscall.Getpgrp()})
+		call, _ := json.Marshal(fakeCall{Args: os.Args[1:], Stdin: string(stdin), Pgid: syscall.Getpgrp(), IdleReclaim: os.Getenv("SMOLVM_IDLE_RECLAIM")})
 		if err := os.WriteFile(path, call, 0o644); err != nil {
 			panic(err)
 		}
@@ -66,6 +66,8 @@ type fakeCall struct {
 	Args  []string
 	Stdin string
 	Pgid  int
+	// IdleReclaim is smolvm's SMOLVM_IDLE_RECLAIM.
+	IdleReclaim string
 }
 
 type fake struct {
@@ -479,6 +481,19 @@ func TestCancelledStartLetsSmolvmFinishTheStart(t *testing.T) {
 	}
 	if outcome, err := os.ReadFile(path + ".outcome"); string(outcome) != "finished" {
 		t.Errorf("smolvm machine start %s, %v; want it finished", outcome, err)
+	}
+}
+
+func TestStartCanTurnOffIdleReclaim(t *testing.T) {
+	t.Setenv("SMOLVM_IDLE_RECLAIM", "")
+	c, call := fake{}.start(t)
+
+	if err := c.Start(t.Context(), "m", smolvm.StartOptions{NoIdleReclaim: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := call().IdleReclaim; got != "off" {
+		t.Errorf("SMOLVM_IDLE_RECLAIM = %q", got)
 	}
 }
 
