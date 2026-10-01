@@ -63,3 +63,30 @@ func TestPackageFetchesBundleAndResolvesImagesWithKbld(t *testing.T) {
 		t.Errorf("got  %v\nwant %v", got, want)
 	}
 }
+
+func TestPackageInstallPinsVersionAndServiceAccount(t *testing.T) {
+	out, err := bundle.PackageInstall("addon-manager.demo.example.com", "0.1.0", "devenv", "devenv-installer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got map[string]any
+	if err := yaml.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"apiVersion": "packaging.carvel.dev/v1alpha1",
+		"kind":       "PackageInstall",
+		"metadata":   map[string]any{"name": "addon-manager", "namespace": "devenv"},
+		"spec": map[string]any{
+			"serviceAccountName": "devenv-installer",
+			"packageRef": map[string]any{
+				"refName":          "addon-manager.demo.example.com",
+				"versionSelection": map[string]any{"constraints": "0.1.0"},
+			},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %v\nwant %v", got, want)
+	}
+}

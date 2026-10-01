@@ -2,6 +2,7 @@
 package devenv
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
@@ -88,20 +90,32 @@ func (e *Environment) bringUp(ctx context.Context) error {
 	if err := e.stage("preflight", func() error { return infra.Preflight(ctx, c) }); err != nil {
 		return err
 	}
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.managementCluster(ctx, c) })
-	g.Go(func() error { return e.stage("images and bundles", func() error { return e.publishPackages(ctx, c) }) })
-	return g.Wait()
-}
-
-func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) error {
-	if err := e.stage("docker daemon", func() (err error) {
-		e.infra, err = infra.Start(ctx, c, e.ID)
+	var reg *infra.Registry
+	if err := e.stage("registry", func() (err error) {
+		reg, err = infra.StartRegistry(ctx, c)
 		return err
 	}); err != nil {
 		return err
 	}
-	return e.stage("management cluster", func() error {
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return e.managementCluster(gctx, c, reg.Host) })
+	g.Go(func() error {
+		return e.stage("images and bundles", func() error { return e.publishPackages(gctx, c, reg) })
+	})
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return e.stage("management packages", func() error { return e.installPackages(ctx) })
+}
+
+func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client, registryHost string) error {
+	if err := e.stage("docker daemon", func() (err error) {
+		e.infra, err = infra.Start(ctx, c, e.ID, registryHost)
+		return err
+	}); err != nil {
+		return err
+	}
+	if err := e.stage("management cluster", func() error {
 		kubeconfig, err := e.infra.CreateManagementCluster(ctx)
 		if err != nil {
 			return err
@@ -121,24 +135,35 @@ func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) e
 			Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second,
 			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
 		})
+	}); err != nil {
+		return err
+	}
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return e.stage("kapp-controller", func() error { return platform.InstallKappController(ctx, c, e.infra) })
 	})
+	g.Go(func() error {
+		return e.stage("cluster api", func() error { return platform.InstallClusterAPI(ctx, c, e.infra) })
+	})
+	return g.Wait()
 }
 
-// packages lists the first-party bundles and the images each one locks.
+const packageVersion = "0.1.0"
+
+// packages lists the first-party bundles, the images each one locks, and whether it runs on the management cluster.
 var packages = []struct {
 	name   string
 	images []string
+	mgmt   bool
 }{
-	{"addon-manager", []string{"addon-manager"}},
-	{"greeting-syncer", []string{"greeting-syncer"}},
-	{"greeting-controller", []string{"greeting-controller", "hello"}},
+	{"addon-manager", []string{"addon-manager"}, true},
+	{"greeting-syncer", []string{"greeting-syncer"}, true},
+	{"greeting-controller", []string{"greeting-controller", "hello"}, false},
 }
 
-func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client) error {
-	reg, err := infra.StartRegistry(ctx, c)
-	if err != nil {
-		return err
-	}
+func refName(pkg string) string { return pkg + ".demo.example.com" }
+
+func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client, reg *infra.Registry) error {
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -167,13 +192,65 @@ func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client) err
 		if err != nil {
 			return fmt.Errorf("push bundle %s: %w", p.name, err)
 		}
-		pkg, err := bundle.Package(p.name+".demo.example.com", "0.1.0", ref)
+		pkg, err := bundle.Package(refName(p.name), packageVersion, ref)
 		if err != nil {
 			return err
 		}
 		e.Packages = append(e.Packages, pkg)
 	}
 	return nil
+}
+
+// installerManifests let kapp-controller install the management packages with cluster-admin.
+const installerManifests = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: devenv
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: devenv-installer
+  namespace: devenv
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: devenv-installer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: devenv-installer
+  namespace: devenv
+`
+
+func (e *Environment) installPackages(ctx context.Context) error {
+	manifests := [][]byte{[]byte(installerManifests)}
+	manifests = append(manifests, e.Packages...)
+	for _, p := range packages {
+		if !p.mgmt {
+			continue
+		}
+		pkgi, err := bundle.PackageInstall(refName(p.name), packageVersion, "devenv", "devenv-installer")
+		if err != nil {
+			return err
+		}
+		manifests = append(manifests, pkgi)
+	}
+	if err := platform.Apply(ctx, e.infra, bytes.Join(manifests, []byte("---\n"))); err != nil {
+		return err
+	}
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	return ready.Wait(ctx, ready.Gate{
+		Name: "PackageInstalls reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, "devenv") },
+	})
 }
 
 func subset(m map[string]string, keys []string) (map[string]string, error) {
@@ -194,7 +271,11 @@ func (e *Environment) Verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return kube.NodesReady(ctx, cs)
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	return errors.Join(kube.NodesReady(ctx, cs), kube.PackageInstallsReconciled(ctx, dyn, "devenv"))
 }
 
 // Close ends the Dagger session, which stops every service in the environment.

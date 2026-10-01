@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -50,4 +51,26 @@ func isReady(n corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+// WithServer points every cluster in kubeconfig at server, verifying certificates against tlsServerName if it is set.
+func WithServer(kubeconfig []byte, server, tlsServerName string) ([]byte, error) {
+	cfg, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cfg.Clusters {
+		c.Server = server
+		c.TLSServerName = tlsServerName
+	}
+	return clientcmd.Write(*cfg)
+}
+
+// Dynamic returns a dynamic client for the kubeconfig at path.
+func Dynamic(path string) (dynamic.Interface, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", path)
+	if err != nil {
+		return nil, err
+	}
+	return dynamic.NewForConfig(cfg)
 }

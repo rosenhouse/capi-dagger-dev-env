@@ -8,12 +8,16 @@ import (
 	"time"
 
 	"dagger.io/dagger"
+
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
 )
 
 const (
-	KindVersion       = "v0.33.0"
-	KubernetesVersion = "v1.37.0"
-	MgmtAPIPort       = 6443
+	KindVersion        = "v0.33.0"
+	KubernetesVersion  = "v1.37.0"
+	ClusterctlVersion  = "v1.14.2"
+	MgmtAPIPort        = 6443
+	containerdCertsDir = "/etc/devenv/certs.d"
 
 	// Digests avoid a registry round trip, and its rate limit, when the image is cached.
 	dindImage      = "docker:29-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0"
@@ -21,17 +25,39 @@ const (
 	kindNodeImage  = "kindest/node:" + KubernetesVersion + "@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
 )
 
-var kindChecksums = map[string]string{
-	"amd64": "sha256:aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d",
-	"arm64": "sha256:20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2",
+// tools lists the binaries in the tools container, by URL and per-architecture checksum.
+var tools = map[string]struct {
+	url       string
+	checksums map[string]string
+}{
+	"kind": {"https://github.com/kubernetes-sigs/kind/releases/download/" + KindVersion + "/kind-linux-%s", map[string]string{
+		"amd64": "sha256:aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d",
+		"arm64": "sha256:20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2",
+	}},
+	"kubectl": {"https://dl.k8s.io/release/" + KubernetesVersion + "/bin/linux/%s/kubectl", map[string]string{
+		"amd64": "sha256:6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f",
+		"arm64": "sha256:922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3",
+	}},
+	"clusterctl": {"https://github.com/kubernetes-sigs/cluster-api/releases/download/" + ClusterctlVersion + "/clusterctl-linux-%s", map[string]string{
+		"amd64": "sha256:01122674fd3c47a33206ab1b8b81d437afbcf5dd25d126535564f24a2cdf676e",
+		"arm64": "sha256:83976008aa9ddb81dab01443c646aaa125e4993e17bf24e790e29779f712d79d",
+	}},
 }
 
+// The node mounts the Docker socket for CAPD and containerd registry config for the session registry.
 var mgmtKindConfig = fmt.Sprintf(`kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
   apiServerAddress: "0.0.0.0"
   apiServerPort: %d
-`, MgmtAPIPort)
+nodes:
+- role: control-plane
+  extraMounts:
+  - hostPath: /var/run/docker.sock
+    containerPath: /var/run/docker.sock
+  - hostPath: %s
+    containerPath: /etc/containerd/certs.d
+`, MgmtAPIPort, containerdCertsDir)
 
 // Infra holds the long-lived services of one environment's Dagger session.
 type Infra struct {
@@ -66,7 +92,8 @@ func requireCgroupV2(magic string) error {
 }
 
 // Start starts the environment's Docker daemon and removes containers and volumes left by an earlier session.
-func Start(ctx context.Context, c *dagger.Client, envID string) (*Infra, error) {
+// Kind nodes pull from registryHost over plain HTTP.
+func Start(ctx context.Context, c *dagger.Client, envID, registryHost string) (*Infra, error) {
 	platform, err := c.DefaultPlatform(ctx)
 	if err != nil {
 		return nil, err
@@ -75,6 +102,8 @@ func Start(ctx context.Context, c *dagger.Client, envID string) (*Infra, error) 
 
 	dind, err := c.Container().From(dindImage).
 		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
+		WithNewFile(containerdCertsDir+"/"+registryHost+"/hosts.toml",
+			fmt.Sprintf("server = %[1]q\n\n[host.%[1]q]\n  capabilities = [\"pull\", \"resolve\"]\n", "http://"+registryHost)).
 		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+envID+"-docker"),
 			dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeLocked}).
 		WithExposedPort(2375).
@@ -84,26 +113,37 @@ func Start(ctx context.Context, c *dagger.Client, envID string) (*Infra, error) 
 		return nil, err
 	}
 
-	kind := c.HTTP("https://github.com/kubernetes-sigs/kind/releases/download/"+KindVersion+"/kind-linux-"+arch,
-		dagger.HTTPOpts{Checksum: kindChecksums[arch]})
+	toolbox := c.Container().From(dockerCLIImage)
+	for name, t := range tools {
+		bin := c.HTTP(fmt.Sprintf(t.url, arch), dagger.HTTPOpts{Checksum: t.checksums[arch]})
+		toolbox = toolbox.WithFile("/usr/local/bin/"+name, bin, dagger.ContainerWithFileOpts{Permissions: 0o755})
+	}
 	i := &Infra{
 		c:    c,
 		dind: dind,
-		tools: c.Container().From(dockerCLIImage).
-			WithFile("/usr/local/bin/kind", kind, dagger.ContainerWithFileOpts{Permissions: 0o755}).
+		tools: toolbox.
 			WithServiceBinding("docker", dind).
 			WithEnvVariable("DOCKER_HOST", "tcp://docker:2375").
 			With(InSession),
 	}
-	_, err = i.run(ctx, `docker rm -fv $(docker ps -aq) 2>/dev/null; docker network prune -f && docker volume prune -af`)
+	_, err = i.Run(ctx, nil, `docker rm -fv $(docker ps -aq) 2>/dev/null; docker network prune -f && docker volume prune -af`)
 	return i, err
 }
 
 // CreateManagementCluster creates the Kind management cluster and returns its kubeconfig.
+// Later Run calls use the cluster as kubectl's default.
 func (i *Infra) CreateManagementCluster(ctx context.Context) ([]byte, error) {
-	out, err := i.run(ctx, fmt.Sprintf("kind create cluster --name mgmt --image %s --config - <<'EOF'\n%sEOF\nkind get kubeconfig --name mgmt",
+	out, err := i.Run(ctx, nil, fmt.Sprintf("kind create cluster --name mgmt --image %s --config - <<'EOF'\n%sEOF\nkind get kubeconfig --name mgmt",
 		kindNodeImage, mgmtKindConfig))
-	return []byte(out), err
+	if err != nil {
+		return nil, err
+	}
+	inSession, err := kube.WithServer([]byte(out), fmt.Sprintf("https://docker:%d", MgmtAPIPort), "localhost")
+	if err != nil {
+		return nil, err
+	}
+	i.tools = i.tools.WithNewFile("/root/.kube/config", string(inSession))
+	return []byte(out), nil
 }
 
 // Tunnel forwards a random host port to a DinD service port and returns the host port.
@@ -126,8 +166,14 @@ func (i *Infra) ExportLogs(ctx context.Context, dir string) error {
 	return err
 }
 
-func (i *Infra) run(ctx context.Context, script string) (string, error) {
-	ctr := i.tools.WithExec([]string{"sh", "-c", script}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny})
+// Run runs script in the tools container, which has docker, kind, kubectl and clusterctl.
+// with, if set, adds files or environment for this run.
+func (i *Infra) Run(ctx context.Context, with dagger.WithContainerFunc, script string) (string, error) {
+	ctr := i.tools
+	if with != nil {
+		ctr = ctr.With(with)
+	}
+	ctr = ctr.WithExec([]string{"sh", "-c", script}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny})
 	code, err := ctr.ExitCode(ctx)
 	if err != nil {
 		return "", err
