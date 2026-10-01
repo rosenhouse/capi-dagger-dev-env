@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -121,6 +122,9 @@ func start(ctx context.Context, o Options) (*Environment, error) {
 // Context lasts until the environment is interrupted, asked to stop, or closed.
 func (e *Environment) Context() context.Context { return e.ctx }
 
+// validVersion matches versions that -ldflags can stamp, or none.
+var validVersion = regexp.MustCompile(`^[A-Za-z0-9._+-]*$`)
+
 func (e *Environment) handlers() map[string]control.Handler {
 	return map[string]control.Handler{
 		"down": func(context.Context, []string, io.Writer) error { e.cancel(); return nil },
@@ -133,11 +137,11 @@ func (e *Environment) handlers() map[string]control.Handler {
 				return errors.New("another redeploy is in progress")
 			}
 			defer e.redeploying.Unlock()
-			var version string
-			if len(args) > 0 {
-				version = args[0]
+			version := strings.Join(args, " ")
+			if !validVersion.MatchString(version) {
+				return fmt.Errorf("version %q is not letters, digits and ._+-", version)
 			}
-			return e.Redeploy(ctx, version, progress)
+			return e.redeploy(ctx, version, progress)
 		},
 	}
 }
@@ -322,12 +326,7 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 	if err != nil {
 		return err
 	}
-	// Sync pins each directory's content, so a save during the build cannot mix snapshots.
-	src, err := build.Source(c, root).Sync(ctx)
-	if err != nil {
-		return err
-	}
-	config, err := build.Config(c, root).Sync(ctx)
+	src, config, err := build.Snapshot(ctx, c, root)
 	if err != nil {
 		return err
 	}
@@ -342,7 +341,8 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 			return fmt.Errorf("push %s: %w", name, err)
 		}
 	}
-	e.Packages, e.bundles = nil, map[string]string{}
+	var pkgs [][]byte
+	bundles := map[string]string{}
 	for _, p := range packages {
 		images, err := subset(refs, p.images)
 		if err != nil {
@@ -360,9 +360,10 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 		if err != nil {
 			return err
 		}
-		e.Packages = append(e.Packages, pkg)
-		e.bundles[p.name] = ref
+		pkgs = append(pkgs, pkg)
+		bundles[p.name] = ref
 	}
+	e.Packages, e.bundles = pkgs, bundles
 	return nil
 }
 
@@ -430,10 +431,10 @@ func subset(m map[string]string, keys []string) (map[string]string, error) {
 	return out, nil
 }
 
-// Redeploy rebuilds images and bundles from the current source and waits for every package,
+// redeploy rebuilds images and bundles from the current source and waits for every package,
 // in both clusters, to deploy its new bundle. An empty version names the build by its source.
 // It reports its stages to progress as well as to the environment's own progress.
-func (e *Environment) Redeploy(ctx context.Context, version string, progress io.Writer) error {
+func (e *Environment) redeploy(ctx context.Context, version string, progress io.Writer) error {
 	stage := func(name string, run func() error) error {
 		fmt.Fprintln(progress, name)
 		return e.stage(name, run)
@@ -442,7 +443,7 @@ func (e *Environment) Redeploy(ctx context.Context, version string, progress io.
 		return err
 	}
 	return stage("redeploy packages", func() error {
-		if err := platform.Apply(ctx, e.infra, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
+		if err := platform.Reapply(ctx, e.infra, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
 			return err
 		}
 		dyn, err := kube.Dynamic(e.MgmtKubeconfig)

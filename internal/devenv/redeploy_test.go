@@ -32,6 +32,17 @@ func TestRedeployRefusesToOverlapAnother(t *testing.T) {
 	}
 }
 
+func TestRedeployRejectsVersionsThatLdflagsCannotTake(t *testing.T) {
+	e := started(t)
+	e.isUp.Store(true)
+	for _, command := range []string{"redeploy it's", "redeploy a b"} {
+		err := control.Request(context.Background(), e.SocketPath(), command, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "version") {
+			t.Errorf("%q: err = %v", command, err)
+		}
+	}
+}
+
 func started(t *testing.T) *Environment {
 	t.Helper()
 	e, err := start(context.Background(), Options{StateDir: t.TempDir(), Name: "alpha"})
