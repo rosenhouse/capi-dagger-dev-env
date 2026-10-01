@@ -162,7 +162,13 @@ func (e *Environment) managementCluster(ctx context.Context) func() error {
 
 func (e *Environment) workloadCluster(ctx context.Context) func() error {
 	return func() error {
-		if err := platform.CreateWorkloadCluster(ctx, e.vm, WorkloadCluster, WorkloadNamespace); err != nil {
+		if err := ready.Wait(ctx, ready.Gate{
+			// CAPI's and CAPD's webhooks can refuse connections for a while after clusterctl init returns.
+			Name: "workload cluster manifests applied", Timeout: 3 * time.Minute, Interval: 5 * time.Second,
+			Check: func(ctx context.Context) error {
+				return platform.CreateWorkloadCluster(ctx, e.vm, WorkloadCluster, WorkloadNamespace)
+			},
+		}); err != nil {
 			return err
 		}
 		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
