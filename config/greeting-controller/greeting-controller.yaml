@@ -32,7 +32,7 @@ metadata:
     kapp.k14s.io/versioned: ""
 data:
   helloImage: hello
-  proxyImage: docker.io/library/nginx:1.29-alpine
+  proxyImage: docker.io/library/nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
 ---
 apiVersion: apps/v1
 kind: Deployment
