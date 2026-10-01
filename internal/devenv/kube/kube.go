@@ -68,6 +68,21 @@ func isReady(n corev1.Node) bool {
 	return false
 }
 
+// Restarts counts the restarts of every container in the cluster.
+func Restarts(ctx context.Context, cs kubernetes.Interface) (int, error) {
+	pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, p := range pods.Items {
+		for _, c := range append(p.Status.InitContainerStatuses, p.Status.ContainerStatuses...) {
+			n += int(c.RestartCount)
+		}
+	}
+	return n, nil
+}
+
 // Dynamic returns a dynamic client for the kubeconfig at path.
 func Dynamic(path string) (dynamic.Interface, error) {
 	cfg, err := Config(path)
