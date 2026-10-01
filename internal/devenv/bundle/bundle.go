@@ -1,4 +1,4 @@
-// Package bundle builds first-party imgpkg bundles and their Packages.
+// Package bundle renders the image locks of first-party imgpkg bundles, and the Packages that install them.
 package bundle
 
 import (
@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"dagger.io/dagger"
 	"sigs.k8s.io/yaml"
 )
 
@@ -49,15 +48,6 @@ func Package(refName, version, bundleRef string) ([]byte, error) {
 			}},
 		},
 	})
-}
-
-// Image packs config and its images lock as an imgpkg bundle image.
-func Image(c *dagger.Client, config *dagger.Directory, imagesLock []byte) *dagger.Container {
-	return c.Container().
-		WithRootfs(c.Directory().
-			WithDirectory("config", config).
-			WithNewFile(".imgpkg/images.yml", string(imagesLock))).
-		WithLabel("dev.carvel.imgpkg.bundle", "true")
 }
 
 // PackageInstall renders a PackageInstall named after the package's short name.

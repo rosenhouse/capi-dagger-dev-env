@@ -1,4 +1,4 @@
-// Package devenv brings up a development environment in one Dagger session.
+// Package devenv runs each development environment in its own smolvm VM.
 package devenv
 
 import (
@@ -7,42 +7,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
+	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
-	"strings"
+	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"dagger.io/dagger"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/build"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/fetch"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/hostbuild"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/oci"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
 type Options struct {
 	Name     string
 	StateDir string
-	// Verbose streams Dagger logs to stderr as well as to the log file.
+	// Verbose streams guest command output to stderr as well as to the environment's guest.log.
 	Verbose bool
-	// Progress receives one line per stage.
+	// Progress receives one line as each stage starts, and one as it ends.
 	Progress io.Writer
+	SmolVM   smolvm.CLI
 }
 
-// Environment is a running environment. It lives until Close.
+// Environment is an environment that this process holds until Close.
 type Environment struct {
 	state.Env
+	Ports              state.Ports
 	MgmtKubeconfig     string
 	WorkloadKubeconfig string
 	// Packages are rendered Package resources for the first-party bundles in the session registry.
@@ -50,148 +53,136 @@ type Environment struct {
 	// bundles maps each package name to its bundle's digest reference.
 	bundles map[string]string
 
-	opts   Options
-	start  time.Time
-	ctx    context.Context
-	cancel context.CancelFunc
-	// stopServing stops the control socket after its requests in flight.
-	stopServing func() error
-	isUp        atomic.Bool
-	// redeploying serializes redeploys.
-	redeploying sync.Mutex
-	infra       *infra.Infra
-	registry    *infra.Registry
-	client      *dagger.Client
-	mirrors     infra.Mirrors
-	closers     []func() error
+	opts     Options
+	start    time.Time
+	vm       *infra.VM
+	cacheDir string
+	closers  []func() error
 }
 
-// Up brings up an environment and waits for its readiness gates.
-func Up(ctx context.Context, o Options) (*Environment, error) {
-	e, err := start(ctx, o)
-	if err != nil {
-		return nil, err
-	}
-	if err := e.bringUp(e.ctx); err != nil {
-		e.ExportLogs()
-		e.Close()
-		return nil, fmt.Errorf("%w\nlogs: %s", err, e.Dir)
-	}
-	e.isUp.Store(true)
-	return e, nil
-}
-
-// start locks the environment and serves its control socket.
-func start(ctx context.Context, o Options) (*Environment, error) {
-	env, err := state.New(o.StateDir, o.Name)
-	if err != nil {
-		return nil, err
-	}
+// open holds env and opens its guest log, truncated if fresh.
+func open(env state.Env, o Options, fresh bool) (*Environment, error) {
 	unlock, err := env.Lock()
 	if err != nil {
 		return nil, err
 	}
-	stale, _ := filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
-	for _, path := range stale {
-		if err := os.Remove(path); err != nil {
-			unlock()
-			return nil, err
-		}
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if fresh {
+		flags |= os.O_TRUNC
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	e := &Environment{Env: env, opts: o, start: time.Now(), ctx: ctx, cancel: cancel,
-		closers: []func() error{func() error { cancel(); unlock(); return nil }}}
-	listening, served := make(chan struct{}), make(chan error, 1)
-	go func() {
-		err := control.Serve(ctx, env.SocketPath(), e.handlers(), func() { close(listening) })
-		if err != nil {
-			cancel()
-		}
-		served <- err
-	}()
-	select {
-	case <-listening:
-	case err := <-served:
-		e.Close()
-		return nil, fmt.Errorf("control socket: %w", err)
+	logFile, err := os.OpenFile(filepath.Join(env.Dir, "guest.log"), flags, 0o600)
+	if err != nil {
+		unlock()
+		return nil, err
 	}
-	e.stopServing = sync.OnceValue(func() error { cancel(); return <-served })
+	var log io.Writer = logFile
+	if o.Verbose {
+		log = io.MultiWriter(logFile, os.Stderr)
+	}
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = os.TempDir()
+	}
+	return &Environment{
+		Env:                env,
+		MgmtKubeconfig:     filepath.Join(env.Dir, "mgmt.kubeconfig"),
+		WorkloadKubeconfig: filepath.Join(env.Dir, "workload.kubeconfig"),
+		opts:               o,
+		start:              time.Now(),
+		vm:                 &infra.VM{CLI: o.SmolVM, Name: env.VM(), Log: &syncWriter{w: log}},
+		cacheDir:           filepath.Join(cacheDir, "devenv"),
+		closers:            []func() error{logFile.Close, func() error { unlock(); return nil }},
+	}, nil
+}
+
+// Up creates the environment called o.Name, or a randomly named one, and waits for its readiness gates.
+// A failed bring-up exports logs and deletes the VM.
+func Up(ctx context.Context, o Options) (*Environment, error) {
+	env, err := state.New(o.StateDir, o.Name)
+	if err != nil {
+		return nil, err
+	}
+	e, err := open(env, o, true)
+	if err != nil {
+		return nil, err
+	}
+	var leftover smolvm.State
+	if err := e.stage("preflight", func() (err error) { leftover, err = e.preflight(ctx); return err }); err != nil {
+		return nil, errors.Join(err, e.Close())
+	}
+	if err := e.forget(); err != nil {
+		return nil, errors.Join(err, e.Close())
+	}
+	if err := e.bringUp(ctx, leftover); err != nil {
+		e.ExportLogs(ctx)
+		_, deleteErr := e.Delete(ctx, false)
+		return nil, errors.Join(fmt.Errorf("%w\nlogs: %s", err, e.Dir), deleteErr, e.Close())
+	}
 	return e, nil
 }
 
-// Context lasts until the environment is interrupted, asked to stop, or closed.
-func (e *Environment) Context() context.Context { return e.ctx }
+// kvmDevice is a variable so that tests can stand in for KVM.
+var kvmDevice = "/dev/kvm"
 
-// validVersion matches versions that -ldflags can stamp, or none.
-var validVersion = regexp.MustCompile(`^[A-Za-z0-9._+-]*$`)
-
-func (e *Environment) handlers() map[string]control.Handler {
-	return map[string]control.Handler{
-		"down": func(context.Context, []string, io.Writer) error { e.cancel(); return nil },
-		// redeploy takes an optional version to stamp the build with.
-		"redeploy": func(ctx context.Context, args []string, progress io.Writer) error {
-			if !e.isUp.Load() {
-				return errors.New("the environment is still coming up")
-			}
-			if !e.redeploying.TryLock() {
-				return errors.New("another redeploy is in progress")
-			}
-			defer e.redeploying.Unlock()
-			version := strings.Join(args, " ")
-			if !validVersion.MatchString(version) {
-				return fmt.Errorf("version %q is not letters, digits and ._+-", version)
-			}
-			return e.redeploy(ctx, version, progress)
-		},
+// preflight checks the host and returns the state of a VM left by an earlier run, which must not be running.
+func (e *Environment) preflight(ctx context.Context) (smolvm.State, error) {
+	if err := errors.Join(e.opts.SmolVM.CheckVersion(ctx), checkKVM(kvmDevice)); err != nil {
+		return "", err
 	}
+	machines, err := e.opts.SmolVM.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	if e.Running(machines) {
+		return "", fmt.Errorf("environment %s is already up; use it, or delete it with: devenv down --name %s", e.Name, e.Name)
+	}
+	return e.VMState(machines), nil
 }
 
-func (e *Environment) bringUp(ctx context.Context) error {
-	logPath := filepath.Join(e.Dir, "dagger.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
+// checkKVM fails on Linux unless this user can open device, KVM's, to read and write.
+func checkKVM(device string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	f, err := os.OpenFile(device, os.O_RDWR, 0)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%s does not exist: enable virtualization in the firmware, or nested virtualization on a cloud VM", device)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("cannot open %s: add your user to its group, for example with sudo usermod -aG kvm $USER, then log in again", device)
+	case err != nil:
 		return err
 	}
-	e.closers = append([]func() error{logFile.Close}, e.closers...)
-	var logs io.Writer = logFile
-	if e.opts.Verbose {
-		logs = io.MultiWriter(logFile, os.Stderr)
-	}
+	return f.Close()
+}
 
-	var c *dagger.Client
-	if err := e.stage("connect to Dagger engine, logging to "+logPath, func() (err error) {
-		c, err = dagger.Connect(ctx, dagger.WithLogOutput(logs),
-			dagger.WithEnvironmentVariable("DAGGER_PROGRESS", "plain"),
-			dagger.WithEnvironmentVariable("NO_COLOR", "1"))
-		return err
-	}); err != nil {
-		return err
+// forget deletes what an earlier run left in the env dir.
+func (e *Environment) forget() error {
+	for _, path := range []string{e.MgmtKubeconfig, e.WorkloadKubeconfig, filepath.Join(e.Dir, "ports.json"), filepath.Join(e.Dir, "logs")} {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
 	}
-	e.closers = append([]func() error{c.Close}, e.closers...)
-	e.client = c
+	return nil
+}
 
-	if err := e.stage("preflight", func() error { return infra.Preflight(ctx, c) }); err != nil {
-		return err
-	}
-	if err := e.stage("registry and mirrors", func() (err error) {
-		e.registry, e.mirrors, err = infra.StartRegistries(ctx, c)
-		return err
-	}); err != nil {
-		return err
-	}
+// bringUp brings up the platform while it builds the first-party images, then installs them.
+func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error {
+	var b build
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.managementCluster(gctx, c) })
+	g.Go(func() error { return e.platform(gctx, leftover) })
 	g.Go(func() error {
-		return e.stage("images and bundles", func() error { return e.publishPackages(gctx, "") })
+		return e.stage("build images and bundles", func() (err error) { b, err = e.build(gctx, ""); return err })
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	if err := e.stage("management packages", func() error { return e.installPackages(ctx) }); err != nil {
-		return err
-	}
-	return e.stage("workload cluster", func() error { return e.workloadCluster(ctx, c) })
+	return e.firstParty(ctx, b)
 }
+
+// apiAttempt bounds each check of a gate that calls an API server through a published port,
+// because smolvm accepts a connection before anything in the guest answers it.
+const apiAttempt = 30 * time.Second
 
 // The workload Cluster's name and namespace in the management cluster.
 const (
@@ -201,81 +192,116 @@ const (
 	remotePackageInstall = WorkloadCluster + "-greeting-controller"
 )
 
-// workloadCluster creates the workload cluster and waits for addon-manager to install greeting-controller into it.
-func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) error {
-	if err := platform.CreateWorkloadCluster(ctx, c, e.infra, WorkloadCluster, WorkloadNamespace); err != nil {
-		return err
-	}
-	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+// platform brings up the VM and everything in it that holds no first-party code: dockerd, the session registry,
+// the management cluster with kapp-controller, CAPI and CAPD, and the workload cluster.
+func (e *Environment) platform(ctx context.Context, leftover smolvm.State) error {
+	cache := fetch.Cache{Dir: filepath.Join(e.cacheDir, "downloads")}
+	downloads, err := infra.Downloads(runtime.GOARCH)
 	if err != nil {
 		return err
 	}
-	if err := ready.Wait(ctx, ready.Gate{
-		Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second,
-		Check: func(ctx context.Context) error {
-			return kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster)
-		},
-	}); err != nil {
-		return err
-	}
-	if err := ready.Wait(ctx, ready.Gate{
-		Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
-		Check: func(ctx context.Context) error {
-			return kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall)
-		},
-	}); err != nil {
-		return err
-	}
-	return e.stage("workload API", func() error { return e.workloadAPI(ctx) })
-}
-
-// workloadAPI tunnels the workload API server to the host and writes its kubeconfig.
-func (e *Environment) workloadAPI(ctx context.Context) error {
-	if err := e.infra.ForwardWorkloadAPI(ctx, WorkloadCluster); err != nil {
-		return err
-	}
-	port, err := e.infra.Tunnel(ctx, infra.WorkloadAPIPort)
-	if err != nil {
-		return err
-	}
-	mgmt, err := kube.Client(e.MgmtKubeconfig)
-	if err != nil {
-		return err
-	}
-	secret, err := mgmt.CoreV1().Secrets(WorkloadNamespace).Get(ctx, WorkloadCluster+"-kubeconfig", metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	if e.WorkloadKubeconfig, err = e.WriteKubeconfig("workload", secret.Data["value"], port); err != nil {
-		return err
-	}
-	workload, err := kube.Client(e.WorkloadKubeconfig)
-	if err != nil {
-		return err
-	}
-	return ready.Wait(ctx, ready.Gate{
-		Name: "workload nodes Ready from host", Timeout: 2 * time.Minute, Interval: 2 * time.Second,
-		Check: func(ctx context.Context) error { return kube.NodesReady(ctx, workload) },
+	downloads = append(downloads, platform.Downloads()...)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return e.stage("VM", func() error { return e.createVM(gctx, leftover) }) })
+	g.Go(func() error {
+		return e.stage("downloads", func() error {
+			g, ctx := errgroup.WithContext(gctx)
+			for _, d := range downloads {
+				g.Go(func() error { _, err := cache.Get(ctx, d.File); return err })
+			}
+			return g.Wait()
+		})
 	})
-}
-
-func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) error {
-	if err := e.stage("docker daemon", func() (err error) {
-		e.infra, err = infra.Start(ctx, c, e.ID, e.registry.Host, e.mirrors)
+	if err := g.Wait(); err != nil {
 		return err
+	}
+	if err := e.stage("guest tools", func() error {
+		if err := e.vm.Copy(ctx, cache, downloads); err != nil {
+			return err
+		}
+		return e.vm.Install(ctx)
 	}); err != nil {
 		return err
 	}
-	if err := e.stage("management cluster", func() error {
-		kubeconfig, err := e.infra.CreateManagementCluster(ctx)
+	if err := e.stage("docker daemon", func() error { return e.vm.StartDocker(ctx) }); err != nil {
+		return err
+	}
+	if err := e.stage("registry", e.startRegistry(ctx)); err != nil {
+		return err
+	}
+	if err := e.stage("management cluster", e.managementCluster(ctx)); err != nil {
+		return err
+	}
+	g, gctx = errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return e.stage("kapp-controller", func() error { return platform.InstallKappController(gctx, e.vm) })
+	})
+	g.Go(func() error {
+		return e.stage("cluster api", func() error { return platform.InstallClusterAPI(gctx, e.vm) })
+	})
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	if err := e.stage("workload cluster", e.workloadCluster(ctx)); err != nil {
+		return err
+	}
+	return e.stage("workload API", e.workloadAPI(ctx))
+}
+
+// createVM deletes a VM that an earlier run left, then creates the environment's VM on free host ports.
+func (e *Environment) createVM(ctx context.Context, leftover smolvm.State) error {
+	if leftover != "" {
+		if err := e.vm.Delete(ctx); err != nil {
+			return err
+		}
+	}
+	ports, err := state.FreePorts()
+	if err != nil {
+		return err
+	}
+	if err := e.WritePorts(ports); err != nil {
+		return err
+	}
+	e.Ports = ports
+	return e.vm.Create(ctx, ports)
+}
+
+func (e *Environment) startRegistry(ctx context.Context) func() error {
+	return func() error {
+		if err := e.vm.StartRegistry(ctx); err != nil {
+			return err
+		}
+		url := fmt.Sprintf("http://localhost:%d/v2/", e.Ports.Registry)
+		return ready.Wait(ctx, ready.Gate{
+			Name: "registry answers from host", Timeout: time.Minute, Interval: time.Second, Attempt: 5 * time.Second,
+			Check: func(ctx context.Context) error { return get(ctx, url) },
+		})
+	}
+}
+
+func get(ctx context.Context, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	return nil
+}
+
+func (e *Environment) managementCluster(ctx context.Context) func() error {
+	return func() error {
+		kubeconfig, err := e.vm.CreateManagementCluster(ctx)
 		if err != nil {
 			return err
 		}
-		port, err := e.infra.Tunnel(ctx, infra.MgmtAPIPort)
-		if err != nil {
-			return err
-		}
-		if e.MgmtKubeconfig, err = e.WriteKubeconfig("mgmt", kubeconfig, port); err != nil {
+		if _, err := e.WriteKubeconfig("mgmt", kubeconfig, e.Ports.MgmtAPI); err != nil {
 			return err
 		}
 		cs, err := kube.Client(e.MgmtKubeconfig)
@@ -283,23 +309,85 @@ func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) e
 			return err
 		}
 		return ready.Wait(ctx, ready.Gate{
-			Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second,
+			Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
 			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
 		})
-	}); err != nil {
-		return err
 	}
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		return e.stage("kapp-controller", func() error { return platform.InstallKappController(ctx, c, e.infra) })
-	})
-	g.Go(func() error {
-		return e.stage("cluster api", func() error { return platform.InstallClusterAPI(ctx, c, e.infra) })
-	})
-	return g.Wait()
 }
 
-const packageVersion = "0.1.0"
+func (e *Environment) workloadCluster(ctx context.Context) func() error {
+	return func() error {
+		if err := platform.CreateWorkloadCluster(ctx, e.vm, WorkloadCluster, WorkloadNamespace); err != nil {
+			return err
+		}
+		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+		if err != nil {
+			return err
+		}
+		return ready.Wait(ctx, ready.Gate{
+			Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second, Attempt: apiAttempt,
+			Check: func(ctx context.Context) error {
+				return kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster)
+			},
+		})
+	}
+}
+
+// workloadAPI publishes the workload API server to the host and writes its kubeconfig.
+func (e *Environment) workloadAPI(ctx context.Context) func() error {
+	return func() error {
+		if err := e.vm.ForwardWorkloadAPI(ctx, WorkloadCluster); err != nil {
+			return err
+		}
+		mgmt, err := kube.Client(e.MgmtKubeconfig)
+		if err != nil {
+			return err
+		}
+		secret, err := mgmt.CoreV1().Secrets(WorkloadNamespace).Get(ctx, WorkloadCluster+"-kubeconfig", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if _, err := e.WriteKubeconfig("workload", secret.Data["value"], e.Ports.WorkloadAPI); err != nil {
+			return err
+		}
+		workload, err := kube.Client(e.WorkloadKubeconfig)
+		if err != nil {
+			return err
+		}
+		return ready.Wait(ctx, ready.Gate{
+			Name: "workload nodes Ready from host", Timeout: 2 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
+			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, workload) },
+		})
+	}
+}
+
+// firstParty pushes the first-party images and bundles, installs the management packages,
+// and waits for addon-manager to install greeting-controller into the workload cluster.
+func (e *Environment) firstParty(ctx context.Context, b build) error {
+	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
+		return err
+	}
+	if err := e.stage("management packages", func() error { return e.installPackages(ctx) }); err != nil {
+		return err
+	}
+	return e.stage("workload packages", func() error {
+		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+		if err != nil {
+			return err
+		}
+		return ready.Wait(ctx, ready.Gate{
+			Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: apiAttempt,
+			Check: func(ctx context.Context) error {
+				return kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall)
+			},
+		})
+	})
+}
+
+const (
+	packageVersion = "0.1.0"
+	baseImage      = "gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3"
+)
 
 // packages lists the first-party bundles, the images each one locks, and whether it runs on the management cluster.
 var packages = []struct {
@@ -314,27 +402,58 @@ var packages = []struct {
 
 func refName(pkg string) string { return pkg + ".demo.example.com" }
 
-// publishPackages builds images and bundles from the current source, stamped with version,
-// or with a digest of the source if version is empty.
-func (e *Environment) publishPackages(ctx context.Context, version string) error {
-	c, reg := e.client, e.registry
+// build is the first-party images and package manifests from one snapshot of the source.
+type build struct {
+	images map[string]v1.Image
+	config map[string]map[string][]byte
+}
+
+// build builds images from the current source, stamped with version, or with a digest of the source if version is empty.
+func (e *Environment) build(ctx context.Context, version string) (build, error) {
 	wd, err := os.Getwd()
 	if err != nil {
-		return err
+		return build{}, err
 	}
-	root, err := build.ModuleRoot(wd)
+	root, err := hostbuild.ModuleRoot(wd)
 	if err != nil {
-		return err
+		return build{}, err
 	}
-	b, err := build.FromHost(ctx, c, root, version)
+	out, err := os.MkdirTemp("", "devenv-build-")
 	if err != nil {
-		return err
+		return build{}, err
 	}
+	defer os.RemoveAll(out)
+	snap, err := hostbuild.Build(ctx, root, runtime.GOARCH, version, out)
+	if err != nil {
+		return build{}, err
+	}
+	base, err := oci.Base(ctx, baseImage, v1.Platform{OS: "linux", Architecture: runtime.GOARCH}, filepath.Join(e.cacheDir, "images"))
+	if err != nil {
+		return build{}, err
+	}
+	b := build{images: map[string]v1.Image{}, config: snap.Config}
+	for _, name := range hostbuild.Commands {
+		bin, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			return build{}, err
+		}
+		if b.images[name], err = oci.Image(base, name, bin); err != nil {
+			return build{}, err
+		}
+	}
+	return b, nil
+}
+
+// push pushes b through the registry's host port, and renders Packages that pull the bundles from inside the clusters.
+func (e *Environment) push(ctx context.Context, b build) error {
+	host := fmt.Sprintf("localhost:%d/", e.Ports.Registry)
 	refs := map[string]string{}
-	for name, image := range build.Images(c, b.Binaries) {
-		if refs[name], err = reg.Push(ctx, image, name); err != nil {
+	for name, img := range b.images {
+		digest, err := oci.Push(ctx, img, host+name)
+		if err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
 		}
+		refs[name] = infra.Registry + "/" + name + "@" + digest.String()
 	}
 	var pkgs [][]byte
 	bundles := map[string]string{}
@@ -347,10 +466,19 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 		if err != nil {
 			return err
 		}
-		ref, err := reg.Push(ctx, bundle.Image(c, b.Config.Directory(p.name), lock), "bundles/"+p.name)
+		config, ok := b.config[p.name]
+		if !ok {
+			return fmt.Errorf("package %s has no config/%s", p.name, p.name)
+		}
+		img, err := oci.Bundle(config, lock)
+		if err != nil {
+			return err
+		}
+		digest, err := oci.Push(ctx, img, host+"bundles/"+p.name)
 		if err != nil {
 			return fmt.Errorf("push bundle %s: %w", p.name, err)
 		}
+		ref := infra.Registry + "/bundles/" + p.name + "@" + digest.String()
 		pkg, err := bundle.Package(refName(p.name), packageVersion, ref)
 		if err != nil {
 			return err
@@ -401,7 +529,7 @@ func (e *Environment) installPackages(ctx context.Context) error {
 		}
 		manifests = append(manifests, pkgi)
 	}
-	if err := platform.Apply(ctx, e.infra, bytes.Join(manifests, []byte("---\n"))); err != nil {
+	if err := platform.Apply(ctx, e.vm, bytes.Join(manifests, []byte("---\n"))); err != nil {
 		return err
 	}
 	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
@@ -409,7 +537,7 @@ func (e *Environment) installPackages(ctx context.Context) error {
 		return err
 	}
 	return ready.Wait(ctx, ready.Gate{
-		Name: "PackageInstalls reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		Name: "PackageInstalls reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: apiAttempt,
 		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, "devenv") },
 	})
 }
@@ -426,19 +554,50 @@ func subset(m map[string]string, keys []string) (map[string]string, error) {
 	return out, nil
 }
 
-// redeploy rebuilds images and bundles from the current source and waits for every package,
-// in both clusters, to deploy its new bundle. An empty version names the build by its source.
-// It reports its stages to progress as well as to the environment's own progress.
-func (e *Environment) redeploy(ctx context.Context, version string, progress io.Writer) error {
-	stage := func(name string, run func() error) error {
-		fmt.Fprintln(progress, name)
-		return e.stage(name, run)
+// Open holds the environment called o.Name, or the only running one. Its VM must be running.
+func Open(ctx context.Context, o Options) (*Environment, error) {
+	machines, err := o.SmolVM.List(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if err := stage("rebuild images and bundles", func() error { return e.publishPackages(ctx, version) }); err != nil {
+	env, err := state.Existing(o.StateDir, o.Name, machines)
+	if err != nil {
+		return nil, err
+	}
+	e, err := open(env, o, false)
+	if err != nil {
+		return nil, err
+	}
+	if machines, err = o.SmolVM.List(ctx); err == nil && !env.Running(machines) {
+		err = fmt.Errorf("environment %s is not running", env.Name)
+	}
+	if err == nil {
+		e.Ports, err = env.Ports()
+	}
+	if err != nil {
+		return nil, errors.Join(err, e.Close())
+	}
+	return e, nil
+}
+
+// validVersion matches versions that -ldflags can stamp, or none.
+var validVersion = regexp.MustCompile(`^[A-Za-z0-9._+-]*$`)
+
+// Redeploy rebuilds images and bundles from the current source and waits for every package,
+// in both clusters, to deploy its new bundle. An empty version names the build by its source.
+func (e *Environment) Redeploy(ctx context.Context, version string) error {
+	if !validVersion.MatchString(version) {
+		return fmt.Errorf("version %q is not letters, digits and ._+-", version)
+	}
+	var b build
+	if err := e.stage("build images and bundles", func() (err error) { b, err = e.build(ctx, version); return err }); err != nil {
 		return err
 	}
-	return stage("redeploy packages", func() error {
-		if err := platform.Reapply(ctx, e.infra, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
+	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
+		return err
+	}
+	return e.stage("redeploy packages", func() error {
+		if err := platform.Reapply(ctx, e.vm, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
 			return err
 		}
 		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
@@ -451,7 +610,7 @@ func (e *Environment) redeploy(ctx context.Context, version string, progress io.
 				namespace, app = WorkloadNamespace, remotePackageInstall
 			}
 			if err := ready.Wait(ctx, ready.Gate{
-				Name: fmt.Sprintf("App %s/%s deployed", namespace, app), Timeout: 5 * time.Minute, Interval: 2 * time.Second,
+				Name: fmt.Sprintf("App %s/%s deployed", namespace, app), Timeout: 5 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
 				Check: func(ctx context.Context) error {
 					return kube.AppDeployed(ctx, dyn, namespace, app, e.bundles[p.name])
 				},
@@ -477,14 +636,7 @@ func (e *Environment) Verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	catalogs := map[string]string{}
-	for name, mirror := range e.mirrors {
-		if catalogs[name], err = mirror.Catalog(ctx); err != nil {
-			return err
-		}
-	}
 	return errors.Join(
-		missingMirroredRepos(catalogs, mirroredRepos),
 		kube.NodesReady(ctx, cs),
 		kube.NodesReady(ctx, workload),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
@@ -493,75 +645,86 @@ func (e *Environment) Verify(ctx context.Context) error {
 	)
 }
 
-// mirroredRepos are repositories that bring-up pulls through each mirror. kindest/node arrives only
-// through the Docker daemon's mirror; the others through containerd in the nodes.
-var mirroredRepos = map[string][]string{
-	"docker.io":       {"kindest/node", "kindest/kindnetd"},
-	"registry.k8s.io": {"cluster-api/cluster-api-controller"},
-	"ghcr.io":         {"carvel-dev/kapp-controller"},
-	"quay.io":         {"jetstack/cert-manager-controller"},
-	"gcr.io":          {"k8s-staging-cluster-api/capd-manager"},
-}
-
-// missingMirroredRepos names the repositories in want that the mirrors' catalogs lack.
-func missingMirroredRepos(catalogs map[string]string, want map[string][]string) error {
-	var missing []string
-	for _, mirror := range slices.Sorted(maps.Keys(want)) {
-		repos := strings.Fields(catalogs[mirror])
-		for _, repo := range want[mirror] {
-			if !slices.Contains(repos, repo) {
-				missing = append(missing, mirror+"/"+repo)
-			}
+// Delete deletes the environment's VM, kubeconfigs and ports, and with purge its whole state dir.
+// It reports whether there was a VM.
+func (e *Environment) Delete(ctx context.Context, purge bool) (bool, error) {
+	ctx = context.WithoutCancel(ctx)
+	machines, err := e.opts.SmolVM.List(ctx)
+	if err != nil {
+		return false, err
+	}
+	existed := e.VMState(machines) != ""
+	if existed {
+		if err := e.vm.Delete(ctx); err != nil {
+			return true, err
 		}
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("mirrors lack repositories: %s", strings.Join(missing, ", "))
+	paths := []string{e.MgmtKubeconfig, e.WorkloadKubeconfig, filepath.Join(e.Dir, "ports.json")}
+	if purge {
+		paths = []string{e.Dir}
 	}
-	return nil
+	for _, path := range paths {
+		if err := os.RemoveAll(path); err != nil {
+			return existed, err
+		}
+	}
+	return existed, nil
 }
 
-// Close ends the Dagger session, which stops every service in the environment.
+// Close releases the environment. Its VM keeps running.
 func (e *Environment) Close() error {
-	e.progress("tearing down")
 	var errs []error
-	if e.stopServing != nil {
-		errs = append(errs, e.stopServing())
-	}
 	for _, closer := range e.closers {
 		errs = append(errs, closer())
 	}
 	return errors.Join(errs...)
 }
 
-// stage reports the start of a stage and names it in any error.
+// stage reports the start and duration of a stage and names it in any error.
 func (e *Environment) stage(name string, run func() error) error {
+	start := time.Now()
 	e.progress(name)
 	if err := run(); err != nil {
 		return fmt.Errorf("stage %q: %w", name, err)
 	}
+	e.progress(fmt.Sprintf("%s: %.1fs", name, time.Since(start).Seconds()))
 	return nil
 }
 
 // ExportLogs writes cluster logs and resources to the environment directory, as far as bring-up got.
-func (e *Environment) ExportLogs() {
-	if e.infra == nil {
+func (e *Environment) ExportLogs(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
+	defer cancel()
+	if machines, err := e.opts.SmolVM.List(ctx); err != nil || e.VMState(machines) == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if e.MgmtKubeconfig != "" {
-		// Checking from inside the session tells a failed API server from a failed host tunnel.
+	if _, err := os.Stat(e.MgmtKubeconfig); err == nil {
+		// Checking from inside the VM tells a failed API server from a failed published port.
 		readyz := "ready"
-		if _, err := e.infra.Run(ctx, nil, "kubectl get --raw=/readyz --request-timeout=10s"); err != nil {
+		if err := e.vm.Run(ctx, "kubectl get --raw=/readyz --request-timeout=10s"); err != nil {
 			readyz = err.Error()
 		}
-		e.progress("management API, from inside the session: " + readyz)
+		e.progress("management API, from inside the VM: " + readyz)
 	}
-	_ = e.infra.ExportLogs(ctx, filepath.Join(e.Dir, "logs"))
+	if err := e.vm.ExportLogs(ctx, filepath.Join(e.Dir, "logs")); err != nil {
+		e.progress("export logs: " + err.Error())
+	}
 }
 
 func (e *Environment) progress(msg string) {
 	if e.opts.Progress != nil {
 		fmt.Fprintf(e.opts.Progress, "[%5.1fs] %s\n", time.Since(e.start).Seconds(), msg)
 	}
+}
+
+// syncWriter serializes writes from guest commands that run at once.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }

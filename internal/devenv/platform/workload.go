@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"dagger.io/dagger"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 
@@ -21,8 +20,8 @@ var kindnet string
 
 // CreateWorkloadCluster applies CAPD's quick-start ClusterClass, a kindnet ClusterResourceSet, and one Cluster
 // with a control plane node and a worker node. The nodes read the containerd registry config the Kind node reads.
-func CreateWorkloadCluster(ctx context.Context, c *dagger.Client, inf *infra.Infra, name, namespace string) error {
-	clusterClass, err := releaseFile(c, "clusterclass-quick-start.yaml").Contents(ctx)
+func CreateWorkloadCluster(ctx context.Context, vm *infra.VM, name, namespace string) error {
+	clusterClass, err := vm.Output(ctx, "cat "+providerPath("infrastructure-docker", "clusterclass-quick-start.yaml"))
 	if err != nil {
 		return err
 	}
@@ -34,16 +33,13 @@ func CreateWorkloadCluster(ctx context.Context, c *dagger.Client, inf *infra.Inf
 	if err != nil {
 		return err
 	}
-	if err := Apply(ctx, inf, append(append(patched, "\n---\n"...), crs...)); err != nil {
+	if err := Apply(ctx, vm, append(append(patched, "\n---\n"...), crs...)); err != nil {
 		return err
 	}
-	_, err = inf.Run(ctx, func(t *dagger.Container) *dagger.Container {
-		return t.WithDirectory("/repo", clusterctlRepository(c)).WithEnvVariable("POD_CIDR", fmt.Sprintf("[%q]", podCIDR))
-	},
-		fmt.Sprintf(`clusterctl generate cluster %[1]s --config /repo/clusterctl.yaml --from /repo/infrastructure-docker/%[3]s/cluster-template-development.yaml \
-  --kubernetes-version %[4]s --control-plane-machine-count 1 --worker-machine-count 1 --target-namespace %[2]s | kubectl apply -f - &&
-kubectl -n %[2]s label cluster %[1]s cni=kindnet --overwrite`, name, namespace, CAPIVersion, infra.KubernetesVersion))
-	return err
+	return vm.Run(ctx, fmt.Sprintf(`POD_CIDR='[%[5]q]' clusterctl generate cluster %[1]s --config %[6]s/clusterctl.yaml --from %[3]s \
+  --kubernetes-version %[4]s --control-plane-machine-count 1 --worker-machine-count 1 --target-namespace %[2]s | kubectl apply -f - >/dev/null
+kubectl -n %[2]s label cluster %[1]s cni=kindnet --overwrite >/dev/null`,
+		name, namespace, providerPath("infrastructure-docker", "cluster-template-development.yaml"), infra.KubernetesVersion, podCIDR, repo))
 }
 
 // patchClusterClass puts every object in manifests into namespace, and adds a host mount
