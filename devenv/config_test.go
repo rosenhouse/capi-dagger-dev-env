@@ -1,9 +1,14 @@
 package devenv
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"dagger.io/dagger"
 )
@@ -95,5 +100,45 @@ func TestBundlesOnSplitsBundlesByTarget(t *testing.T) {
 	}
 	if got := c.bundlesOn(Workload, bundles); !slices.Equal(got, []string{"reg/work@sha256:b"}) {
 		t.Errorf("bundlesOn(Workload) = %v", got)
+	}
+}
+
+func TestConfigPathsMustExistUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{
+		Root:     root,
+		Commands: []string{"./cmd/hello", "./cmd/missing"},
+		Packages: []Package{{Name: "hello", Config: "config/hello"}},
+	}
+
+	err := c.checkPaths()
+
+	for _, want := range []string{"command ./cmd/missing not found under " + root, "package hello's config config/hello not found under " + root} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+	}
+	if err != nil && strings.Contains(err.Error(), "./cmd/hello ") {
+		t.Errorf("err = %v reports an existing command", err)
+	}
+}
+
+func TestUpChecksPathsBeforeStarting(t *testing.T) {
+	t.Setenv("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "unix:///nonexistent/devenv.sock")
+	c := Config{
+		Root:     t.TempDir(),
+		Commands: []string{"./cmd/hello"},
+		Packages: []Package{{Name: "hello", RefName: "hello.example.com", Config: "config/hello"}},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := Up(ctx, c, Options{Name: "paths", StateDir: t.TempDir(), Progress: io.Discard})
+
+	if err == nil || !strings.HasPrefix(err.Error(), "config: command ./cmd/hello not found") {
+		t.Errorf("err = %v", err)
 	}
 }
