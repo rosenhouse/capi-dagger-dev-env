@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go test ./internal/devenv/build/ ./internal/devenv/infra/
+      - run: go test ./devenv/build/ ./devenv/infra/
         env:
           DEVENV_ENGINE_TESTS: "1"
       - run: go run ./cmd/devenv test --name ci

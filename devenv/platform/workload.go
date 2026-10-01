@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/infra"
 )
 
 const podCIDR = "192.168.0.0/16"

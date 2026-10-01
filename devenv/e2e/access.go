@@ -24,7 +24,7 @@ import (
 	"k8s.io/streaming/pkg/httpstream"
 	"k8s.io/utils/ptr"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
 )
 
 // KubectlWorks waits until logs and port-forward to CoreDNS, and exec in etcd, work the way kubectl does them.

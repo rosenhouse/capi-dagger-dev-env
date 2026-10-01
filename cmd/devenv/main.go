@@ -15,10 +15,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/e2e"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/control"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/e2e"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/state"
 )
 
 func main() {

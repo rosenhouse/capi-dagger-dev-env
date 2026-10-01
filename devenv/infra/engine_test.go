@@ -9,7 +9,7 @@ import (
 
 	"dagger.io/dagger"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/infra"
 )
 
 // TestPurgeEmptiesTheDockerDataVolume needs a Dagger engine, so it runs only with DEVENV_ENGINE_TESTS set.

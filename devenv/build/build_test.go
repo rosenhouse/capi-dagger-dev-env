@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/build"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/build"
 )
 
 func TestModuleRootFindsNearestGoModAbove(t *testing.T) {

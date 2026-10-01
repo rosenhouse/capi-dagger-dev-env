@@ -6,7 +6,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/bundle"
 )
 
 func TestImagesLockMapsPlaceholdersToRefs(t *testing.T) {

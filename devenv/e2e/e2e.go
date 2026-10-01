@@ -14,8 +14,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	demov1 "github.com/rosenhouse/capi-dagger-dev-env/api/v1alpha1"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
 )
 
 const (

@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
 )
 
 func TestPackageInstallsReconciledWhenAllSucceeded(t *testing.T) {

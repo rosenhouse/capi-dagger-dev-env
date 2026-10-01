@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
 )
 
 func TestWaitReturnsOnceCheckPasses(t *testing.T) {
