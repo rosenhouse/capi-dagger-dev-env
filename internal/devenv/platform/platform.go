@@ -47,12 +47,13 @@ func InstallClusterAPI(ctx context.Context, c *dagger.Client, inf *infra.Infra) 
 	return err
 }
 
-// Apply server-side applies manifests to the management cluster.
+// Apply server-side applies manifests to the management cluster, taking ownership of every field they set.
+// Without forcing, reapplying a Package conflicts with kubectl's own earlier apply, as kapp-controller's aggregated Package API records it.
 func Apply(ctx context.Context, inf *infra.Infra, manifests []byte) error {
 	_, err := inf.Run(ctx, func(t *dagger.Container) *dagger.Container {
 		return t.WithNewFile("/manifests.yaml", string(manifests))
 	},
-		"kubectl apply --server-side -f /manifests.yaml")
+		"kubectl apply --server-side --force-conflicts -f /manifests.yaml")
 	return err
 }
 
