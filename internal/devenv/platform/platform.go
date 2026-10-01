@@ -22,6 +22,8 @@ var capiReleaseChecksums = map[string]string{
 	"bootstrap-components.yaml":                  "sha256:2a2d24f83244a6dae60e35d9e72e93c6ac3c209eedc467184737bb8eecfd63bb",
 	"control-plane-components.yaml":              "sha256:7aa827b43eee898d8597bb39b7db5cf755c872c7a4da68b05cc3a9f35c459c93",
 	"infrastructure-components-development.yaml": "sha256:f6aef43bf70b76a38b1628cd4349d291159fbfd8082dbe9c2ec13d04487b5867",
+	"cluster-template-development.yaml":          "sha256:7dd5249f22a4ce0fbe667d1c764dd5919775f81847bceb2aa16fc5acb138b99b",
+	"clusterclass-quick-start.yaml":              "sha256:85d414afc4af00e4ff4472cec46ab49a6aa85cb839a771b44ab0a6c7f6c8e24e",
 	"metadata.yaml":                              "sha256:c470906f551ac3e3e9aedc9a3e733b5a5994428693df43e95f65ea67c035f9fe",
 }
 
@@ -59,18 +61,20 @@ var clusterctlFiles = []struct{ dir, file string }{
 	{"bootstrap-kubeadm", "bootstrap-components.yaml"},
 	{"control-plane-kubeadm", "control-plane-components.yaml"},
 	{"infrastructure-docker", "infrastructure-components-development.yaml"},
+	{"infrastructure-docker", "cluster-template-development.yaml"},
+}
+
+func releaseFile(c *dagger.Client, file string) *dagger.File {
+	return c.HTTP("https://github.com/kubernetes-sigs/cluster-api/releases/download/"+CAPIVersion+"/"+file,
+		dagger.HTTPOpts{Checksum: capiReleaseChecksums[file]})
 }
 
 func clusterctlRepository(c *dagger.Client) *dagger.Directory {
-	release := func(file string) *dagger.File {
-		return c.HTTP("https://github.com/kubernetes-sigs/cluster-api/releases/download/"+CAPIVersion+"/"+file,
-			dagger.HTTPOpts{Checksum: capiReleaseChecksums[file]})
-	}
-	metadata := release("metadata.yaml")
+	metadata := releaseFile(c, "metadata.yaml")
 	repo := c.Directory()
 	for _, p := range clusterctlFiles {
 		dir := p.dir + "/" + CAPIVersion + "/"
-		repo = repo.WithFile(dir+p.file, release(p.file)).WithFile(dir+"metadata.yaml", metadata)
+		repo = repo.WithFile(dir+p.file, releaseFile(c, p.file)).WithFile(dir+"metadata.yaml", metadata)
 	}
 	return repo.
 		WithFile("cert-manager/"+CertManagerVersion+"/cert-manager.yaml",
