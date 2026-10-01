@@ -20,6 +20,7 @@ for e in $EVENTS; do
 	echo "hist:${e#*;}:size=4096" >>"$tracing/events/${e%%;*}/trigger" || echo "no histogram for ${e%%;*}"
 done
 
+grep -m1 '^vendor_id' /proc/cpuinfo | sed 's/.*: */C /' >>"$out/host-samples.log"
 while :; do
 	echo "T $(date +%s.%N)"
 	echo "M $(awk '{ printf "%s%s ", $1, $2 }' /proc/meminfo)"

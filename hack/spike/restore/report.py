@@ -59,11 +59,14 @@ def number(text):
 
 
 def read_host():
-    samples, cur = [], None
+    """Returns the samples, and whether the host CPU is AMD."""
+    samples, cur, amd = [], None, False
     path = OUT / "host-samples.log"
     for line in (path.read_text(errors="replace") if path.exists() else "").splitlines():
         kind, _, rest = line.partition(" ")
-        if kind == "T":
+        if kind == "C":
+            amd = rest == "AuthenticAMD"
+        elif kind == "T":
             cur = {"t": float(rest), "mem": {}, "vm": {}, "proc": {}, "kvm": {}, "hist": defaultdict(dict)}
             samples.append(cur)
         elif cur is None:
@@ -94,7 +97,7 @@ def read_host():
                 parts = re.split(r",\s*(?=\w+:)", m.group(1))
                 key = "/".join(re.sub(r"\s*\[\s*\d+\]$", "", p.split(":", 1)[1].strip()) for p in parts)
                 cur["hist"][event][key] = int(m.group(3) if m.group(3) else m.group(2))
-    return samples
+    return samples, amd
 
 
 def read_guest(path):
@@ -223,8 +226,7 @@ def fmt(v, digits=0):
 
 
 def main():
-    amd = "AuthenticAMD" in Path("/proc/cpuinfo").read_text()
-    host = read_host()
+    host, amd = read_host()
     guests = {p.stem[len("guest-"):]: read_guest(p) for p in OUT.glob("guest-*.log") if p.stem.count("-") == 1}
     phases = load_lines("phases.log")
     pids = load_lines("pids.log")

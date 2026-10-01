@@ -24,9 +24,9 @@ jobs:
           - { mode: restore, prep: zero-fill, thp: never, rep: 3 }
           - { mode: branch, prep: zero-fill, thp: never, rep: 1 }
           - { mode: branch, prep: zero-fill, thp: never, rep: 2 }
-          - { mode: branch, prep: zero-fill, thp: never, rep: 3 }
+          - { mode: branch, prep: zero-fill, thp: always, rep: 1 }
+          - { mode: branch, prep: zero-fill, thp: always, rep: 2 }
           - { mode: branch-copy, prep: zero-fill, thp: never, rep: 1 }
-          - { mode: branch-copy, prep: zero-fill, thp: never, rep: 2 }
           - { mode: restore, prep: none, thp: never, rep: 1 }
           - { mode: restore, prep: none, thp: never, rep: 2 }
     runs-on: ubuntu-24.04
