@@ -17,6 +17,7 @@ On Apple Silicon macOS, see [docs/macos.md](docs/macos.md).
 ```sh
 go run ./cmd/devenv up           # holds the environment until Ctrl-C
 go run ./cmd/devenv test         # brings up an environment, verifies it, and tears it down
+go run ./cmd/devenv redeploy     # rebuilds from the current source into the running environment
 go run ./cmd/devenv status       # lists environments and whether each is running
 go run ./cmd/devenv kubeconfig --cluster workload > workload.kubeconfig
 go run ./cmd/devenv down --purge # stops an environment and deletes its cached Docker data and state

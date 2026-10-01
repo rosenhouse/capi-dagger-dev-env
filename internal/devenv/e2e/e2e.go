@@ -55,16 +55,44 @@ func GreetingReachesWorkloadCluster(ctx context.Context, mgmtKubeconfig, workloa
 	return nil
 }
 
-// serves checks the greeting through the proxy Service, by way of the API server's service proxy.
-func serves(ctx context.Context, cs kubernetes.Interface, message string) error {
-	body, err := cs.CoreV1().Services(workloadNamespace).ProxyGet("http", greetingName+"-proxy", "80", "/", nil).DoRaw(ctx)
+// HelloServesVersion waits for the workload cluster to serve the scenario's Greeting from a hello built as version.
+// It needs GreetingReachesWorkloadCluster to have run.
+func HelloServesVersion(ctx context.Context, workloadKubeconfig, version string) error {
+	workload, err := kube.Client(workloadKubeconfig)
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(string(body), message+" (hello ") {
+	return ready.Wait(ctx, ready.Gate{
+		Name: fmt.Sprintf("workload cluster serves hello %s", version), Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		Check: func(ctx context.Context) error {
+			body, err := get(ctx, workload)
+			if err != nil {
+				return err
+			}
+			if !strings.HasSuffix(body, "(hello "+version+")\n") {
+				return fmt.Errorf("proxy served %q", body)
+			}
+			return nil
+		},
+	})
+}
+
+// serves checks the greeting through the proxy Service.
+func serves(ctx context.Context, cs kubernetes.Interface, message string) error {
+	body, err := get(ctx, cs)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(body, message+" (hello ") {
 		return fmt.Errorf("proxy served %q", body)
 	}
 	return nil
+}
+
+// get reads the proxy Service's response by way of the API server's service proxy.
+func get(ctx context.Context, cs kubernetes.Interface) (string, error) {
+	body, err := cs.CoreV1().Services(workloadNamespace).ProxyGet("http", greetingName+"-proxy", "80", "/", nil).DoRaw(ctx)
+	return string(body), err
 }
 
 func controllerRuntimeClient(kubeconfig string) (client.Client, error) {
