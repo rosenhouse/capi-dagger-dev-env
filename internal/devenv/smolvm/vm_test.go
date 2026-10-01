@@ -33,8 +33,20 @@ func TestMachineLifecycle(t *testing.T) {
 		Ports: []smolvm.Port{{Host: ports[0], Guest: 8080}}}))
 	must(t, c.Start(ctx, source, smolvm.StartOptions{Branchable: true}))
 
-	if out, err := c.Run(ctx, source, "echo hello\nuname -s"); err != nil || out != "hello\nLinux\n" {
+	if out, err := c.Run(ctx, source, "echo hello\nuname -s", smolvm.ExecOptions{}); err != nil || out != "hello\nLinux\n" {
 		t.Fatalf("Run() = %q, %v", out, err)
+	}
+
+	in := filepath.Join(t.TempDir(), "in")
+	must(t, os.WriteFile(in, []byte("copied\n"), 0o600))
+	must(t, c.CopyIn(ctx, source, in, "/opt/copy/a", 0o750))
+	if out, err := c.Run(ctx, source, "stat -c %a /opt/copy/a; cat /opt/copy/a", smolvm.ExecOptions{}); err != nil || out != "750\ncopied\n" {
+		t.Fatalf("after CopyIn, Run() = %q, %v", out, err)
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	must(t, c.CopyOut(ctx, source, "/opt/copy/a", out))
+	if got, err := os.ReadFile(out); err != nil || string(got) != "copied\n" {
+		t.Fatalf("CopyOut wrote %q, %v", got, err)
 	}
 
 	var stdout strings.Builder
@@ -50,13 +62,13 @@ func TestMachineLifecycle(t *testing.T) {
 		t.Fatalf("Exec() with a timeout returned %v; want exit 124", err)
 	}
 
-	if _, err := c.Run(ctx, source, "echo 'served from RAM' >/dev/shm/msg"); err != nil {
+	if _, err := c.Run(ctx, source, "echo 'served from RAM' >/dev/shm/msg", smolvm.ExecOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	pid, err := c.Spawn(ctx, source, []string{"nc", "-lk", "-p", "8080", "-e", "cat", "/dev/shm/msg"}, nil)
 	must(t, err)
 	wantServed(t, ports[0], served)
-	if comm, err := c.Run(ctx, source, fmt.Sprintf("cat /proc/%d/comm", pid)); err != nil || comm != "nc\n" {
+	if comm, err := c.Run(ctx, source, fmt.Sprintf("cat /proc/%d/comm", pid), smolvm.ExecOptions{}); err != nil || comm != "nc\n" {
 		t.Errorf("Spawn() returned PID %d, whose command is %q, %v; want nc", pid, comm, err)
 	}
 
