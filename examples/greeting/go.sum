@@ -182,8 +182,8 @@ github.com/prometheus/procfs v0.21.1 h1:GljZCt+zSTS+NZq88cyQ1LjZ+RCHp3uVuabBWA5+
 github.com/prometheus/procfs v0.21.1/go.mod h1:aB55Cww9pdSJVHk0hUf0inxWyyjPogFIjmHKYgMKmtY=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
-github.com/rosenhouse/capi-dagger-dev-env v0.0.0-20261001052034-1ea3c656c1ec h1:PqPL8Q4hmQSVQ5UbTaFmMKYND5mOOL0L9lXTCs1ZV2Y=
-github.com/rosenhouse/capi-dagger-dev-env v0.0.0-20261001052034-1ea3c656c1ec/go.mod h1:BbHelO4DLf8e184wWK9qOLZamC6mczQZLo21mI9wPlk=
+github.com/rosenhouse/capi-dagger-dev-env v0.0.0-20261001062537-66ae1d8a6106 h1:+L6iEhrCh7G/ho1v/CdGPQLdCWcUscWI5r5HbSnZRUc=
+github.com/rosenhouse/capi-dagger-dev-env v0.0.0-20261001062537-66ae1d8a6106/go.mod h1:Vruc2t9S2MI6EtkcjyaLxCBT2XvivGZ+rsoY93KKYP0=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/sergi/go-diff v1.3.1 h1:xkr+Oxo4BOQKmkn/B9eMK0g5Kg/983T9DqqPHwYqD+8=
 github.com/sergi/go-diff v1.3.1/go.mod h1:aMJSSKb2lpPvRNec0+w3fl7LP9IOFzdc9Pa4NFbPK1I=

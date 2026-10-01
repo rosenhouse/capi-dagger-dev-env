@@ -3,7 +3,7 @@ module github.com/rosenhouse/capi-dagger-dev-env/examples/greeting
 go 1.26.1
 
 require (
-	github.com/rosenhouse/capi-dagger-dev-env v0.0.0-20261001052034-1ea3c656c1ec
+	github.com/rosenhouse/capi-dagger-dev-env v0.0.0-20261001062537-66ae1d8a6106
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3

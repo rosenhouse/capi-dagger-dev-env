@@ -57,4 +57,5 @@ func main() {
 
 Run it from your module, which devenv builds from.
 devenv stamps each build's version into a command's `var version string` in package `main`.
-See [`devenv.Config`](devenv/config.go) for the hooks, and [`examples/greeting/cmd/devenv`](examples/greeting/cmd/devenv/main.go) for the Greeting example's configuration.
+See [`devenv.Config`](devenv/config.go) for the hooks.
+[`devenv/minimal_test.go`](devenv/minimal_test.go) configures the smallest consumer, and [`examples/greeting/cmd/devenv`](examples/greeting/cmd/devenv/main.go) a larger one.
