@@ -2,9 +2,11 @@
 package build
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"dagger.io/dagger"
 )
@@ -19,16 +21,28 @@ var Commands = []string{"addon-manager", "greeting-syncer", "greeting-controller
 
 // Source selects the Go source of the first-party commands under root.
 // It leaves out the devenv orchestrator and tests, so editing them keeps the build cached.
+// Each evaluation rereads the host, so a long-lived session sees edits.
 func Source(c *dagger.Client, root string) *dagger.Directory {
 	return c.Host().Directory(root, dagger.HostDirectoryOpts{
 		Include: []string{"go.mod", "go.sum", "api/", "cmd/", "internal/"},
 		Exclude: []string{"cmd/devenv/", "internal/devenv/", "**/*_test.go"},
+		NoCache: true,
 	})
 }
 
-// Config is the directory of package manifests under root.
+// Config is the directory of package manifests under root. Each evaluation rereads the host.
 func Config(c *dagger.Client, root string) *dagger.Directory {
-	return c.Host().Directory(root + "/config")
+	return c.Host().Directory(root+"/config", dagger.HostDirectoryOpts{NoCache: true})
+}
+
+// Version names a build of src by its content.
+func Version(ctx context.Context, src *dagger.Directory) (string, error) {
+	digest, err := src.Digest(ctx)
+	if err != nil {
+		return "", err
+	}
+	_, hex, _ := strings.Cut(digest, ":")
+	return hex[:12], nil
 }
 
 // ModuleRoot returns the nearest directory at or above dir that holds a go.mod.
@@ -43,9 +57,9 @@ func ModuleRoot(dir string) (string, error) {
 	}
 }
 
-// Images builds every command and returns its image by name.
-func Images(c *dagger.Client, src *dagger.Directory) map[string]*dagger.Container {
-	args := []string{"go", "build", "-trimpath", "-o", "/out/"}
+// Images builds every command, with version in its main.version, and returns its image by name.
+func Images(c *dagger.Client, src *dagger.Directory, version string) map[string]*dagger.Container {
+	args := []string{"go", "build", "-trimpath", "-ldflags", "-X main.version=" + version, "-o", "/out/"}
 	for _, name := range Commands {
 		args = append(args, "./cmd/"+name)
 	}

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dagger.io/dagger"
@@ -45,6 +46,8 @@ type Environment struct {
 	WorkloadKubeconfig string
 	// Packages are rendered Package resources for the first-party bundles in the session registry.
 	Packages [][]byte
+	// bundles maps each package name to its bundle's digest reference.
+	bundles map[string]string
 
 	opts   Options
 	start  time.Time
@@ -52,8 +55,12 @@ type Environment struct {
 	cancel context.CancelFunc
 	// stopServing stops the control socket after its requests in flight.
 	stopServing func() error
+	isUp        atomic.Bool
+	// redeploying serializes redeploys.
+	redeploying sync.Mutex
 	infra       *infra.Infra
 	registry    *infra.Registry
+	client      *dagger.Client
 	mirrors     infra.Mirrors
 	closers     []func() error
 }
@@ -69,6 +76,7 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 		e.Close()
 		return nil, fmt.Errorf("%w\nlogs: %s", err, e.Dir)
 	}
+	e.isUp.Store(true)
 	return e, nil
 }
 
@@ -116,6 +124,21 @@ func (e *Environment) Context() context.Context { return e.ctx }
 func (e *Environment) handlers() map[string]control.Handler {
 	return map[string]control.Handler{
 		"down": func(context.Context, []string, io.Writer) error { e.cancel(); return nil },
+		// redeploy takes an optional version to stamp the build with.
+		"redeploy": func(ctx context.Context, args []string, progress io.Writer) error {
+			if !e.isUp.Load() {
+				return errors.New("the environment is still coming up")
+			}
+			if !e.redeploying.TryLock() {
+				return errors.New("another redeploy is in progress")
+			}
+			defer e.redeploying.Unlock()
+			var version string
+			if len(args) > 0 {
+				version = args[0]
+			}
+			return e.Redeploy(ctx, version, progress)
+		},
 	}
 }
 
@@ -141,6 +164,7 @@ func (e *Environment) bringUp(ctx context.Context) error {
 		return err
 	}
 	e.closers = append([]func() error{c.Close}, e.closers...)
+	e.client = c
 
 	if err := e.stage("preflight", func() error { return infra.Preflight(ctx, c) }); err != nil {
 		return err
@@ -154,7 +178,7 @@ func (e *Environment) bringUp(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return e.managementCluster(gctx, c) })
 	g.Go(func() error {
-		return e.stage("images and bundles", func() error { return e.publishPackages(gctx, c, e.registry) })
+		return e.stage("images and bundles", func() error { return e.publishPackages(gctx, "") })
 	})
 	if err := g.Wait(); err != nil {
 		return err
@@ -286,7 +310,10 @@ var packages = []struct {
 
 func refName(pkg string) string { return pkg + ".demo.example.com" }
 
-func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client, reg *infra.Registry) error {
+// publishPackages builds images and bundles from the current source, stamped with version,
+// or with a digest of the source if version is empty.
+func (e *Environment) publishPackages(ctx context.Context, version string) error {
+	c, reg := e.client, e.registry
 	wd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -295,13 +322,27 @@ func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client, reg
 	if err != nil {
 		return err
 	}
+	// Sync pins each directory's content, so a save during the build cannot mix snapshots.
+	src, err := build.Source(c, root).Sync(ctx)
+	if err != nil {
+		return err
+	}
+	config, err := build.Config(c, root).Sync(ctx)
+	if err != nil {
+		return err
+	}
+	if version == "" {
+		if version, err = build.Version(ctx, src); err != nil {
+			return err
+		}
+	}
 	refs := map[string]string{}
-	for name, image := range build.Images(c, build.Source(c, root)) {
+	for name, image := range build.Images(c, src, version) {
 		if refs[name], err = reg.Push(ctx, image, name); err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
 		}
 	}
-	config := build.Config(c, root)
+	e.Packages, e.bundles = nil, map[string]string{}
 	for _, p := range packages {
 		images, err := subset(refs, p.images)
 		if err != nil {
@@ -320,6 +361,7 @@ func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client, reg
 			return err
 		}
 		e.Packages = append(e.Packages, pkg)
+		e.bundles[p.name] = ref
 	}
 	return nil
 }
@@ -386,6 +428,43 @@ func subset(m map[string]string, keys []string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// Redeploy rebuilds images and bundles from the current source and waits for every package,
+// in both clusters, to deploy its new bundle. An empty version names the build by its source.
+// It reports its stages to progress as well as to the environment's own progress.
+func (e *Environment) Redeploy(ctx context.Context, version string, progress io.Writer) error {
+	stage := func(name string, run func() error) error {
+		fmt.Fprintln(progress, name)
+		return e.stage(name, run)
+	}
+	if err := stage("rebuild images and bundles", func() error { return e.publishPackages(ctx, version) }); err != nil {
+		return err
+	}
+	return stage("redeploy packages", func() error {
+		if err := platform.Apply(ctx, e.infra, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
+			return err
+		}
+		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+		if err != nil {
+			return err
+		}
+		for _, p := range packages {
+			namespace, app := "devenv", p.name
+			if !p.mgmt {
+				namespace, app = WorkloadNamespace, remotePackageInstall
+			}
+			if err := ready.Wait(ctx, ready.Gate{
+				Name: fmt.Sprintf("App %s/%s deployed", namespace, app), Timeout: 5 * time.Minute, Interval: 2 * time.Second,
+				Check: func(ctx context.Context) error {
+					return kube.AppDeployed(ctx, dyn, namespace, app, e.bundles[p.name])
+				},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Verify checks the environment from the host through its kubeconfigs.

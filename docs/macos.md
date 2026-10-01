@@ -56,5 +56,6 @@ Run these from a clean checkout and report the results on #13.
    4. `kubectl -n kube-system logs deploy/coredns` prints logs.
    5. `kubectl -n kube-system exec $(kubectl -n kube-system get pod -l component=etcd -o name | head -1) -- etcdctl version` prints a version.
    6. `kubectl -n kube-system port-forward deploy/coredns 8080`, then `curl localhost:8080/health` in a third terminal prints `OK`.
-   7. `go run ./cmd/devenv down --name mac --purge` stops `up` and removes `.devenv/mac`.
+   7. Edit the reply format in `cmd/hello/main.go`, then `go run ./cmd/devenv redeploy --name mac` prints `Redeployed environment mac.`
+   8. `go run ./cmd/devenv down --name mac --purge` stops `up` and removes `.devenv/mac`.
 4. Report the runtime and its version, the macOS version, the chip, and the times from steps 1 and 2.

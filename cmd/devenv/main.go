@@ -11,10 +11,12 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/e2e"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
@@ -35,8 +37,9 @@ func main() {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Environment %s is up.\n  management: export KUBECONFIG=%s\n  workload:   export KUBECONFIG=%s\nPress Ctrl-C to tear it down.\n",
-				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig)
+			fmt.Printf("Environment %s is up.\n  management: export KUBECONFIG=%s\n  workload:   export KUBECONFIG=%s\n"+
+				"After changing code, run: devenv redeploy --name %s\nPress Ctrl-C to tear it down.\n",
+				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig, env.Name)
 			<-env.Context().Done()
 			return env.Close()
 		},
@@ -53,6 +56,12 @@ func main() {
 			testErr := env.Verify(env.Context())
 			if testErr == nil {
 				testErr = e2e.GreetingReachesWorkloadCluster(env.Context(), env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
+			}
+			if testErr == nil {
+				testErr = control.Request(env.Context(), env.SocketPath(), "redeploy redeploy-test", os.Stderr)
+			}
+			if testErr == nil {
+				testErr = e2e.HelloServesVersion(env.Context(), env.WorkloadKubeconfig, "redeploy-test")
 			}
 			if testErr != nil {
 				env.ExportLogs()
@@ -111,6 +120,28 @@ func main() {
 	}
 	kubeconfigCmd.Flags().StringVar(&cluster, "cluster", "mgmt", "mgmt or workload")
 	root.AddCommand(kubeconfigCmd)
+	var version string
+	redeployCmd := &cobra.Command{
+		Use:   "redeploy",
+		Short: "Rebuild from the current source and redeploy into a running environment",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.ContainsFunc(version, unicode.IsSpace) {
+				return fmt.Errorf("version %q contains whitespace", version)
+			}
+			env, err := state.Existing(o.StateDir, o.Name)
+			if err != nil {
+				return err
+			}
+			if err := control.Request(cmd.Context(), env.SocketPath(), strings.TrimSpace("redeploy "+version), os.Stderr); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "Redeployed environment %s.\n", env.Name)
+			return nil
+		},
+	}
+	redeployCmd.Flags().StringVar(&version, "version", "", "version to stamp the build with (default: a digest of the source)")
+	root.AddCommand(redeployCmd)
 	var purge bool
 	downCmd := &cobra.Command{
 		Use:   "down",
