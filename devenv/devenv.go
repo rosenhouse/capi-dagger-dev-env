@@ -262,6 +262,9 @@ func (e *Environment) workloadAPI(ctx context.Context) error {
 func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) error {
 	if err := e.stage("docker daemon", func() (err error) {
 		e.infra, err = infra.Start(ctx, c, e.ID, e.registry.Host, e.mirrors)
+		if err == nil {
+			e.closers = append([]func() error{e.infra.Close}, e.closers...)
+		}
 		return err
 	}); err != nil {
 		return err
