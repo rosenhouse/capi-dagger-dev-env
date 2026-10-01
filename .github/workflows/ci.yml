@@ -20,6 +20,9 @@ jobs:
       - run: go vet ./... ./examples/greeting/...
       - run: go test ./... ./examples/greeting/...
       - run: go generate ./... ./examples/greeting/...
+      # The minimal consumer is a module outside the workspace.
+      - run: GOWORK=off go vet ./...
+        working-directory: devenv/cli/testdata/minimal
       # The example's images build from its own go.mod, so it must match the workspace.
       - run: go work sync
       - run: test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
@@ -62,14 +65,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
-      - run: go test -run TestMinimalConsumer -timeout 25m -v ./devenv/
+      - run: go test -run TestMinimalConsumer -timeout 25m -v ./devenv/cli/
         env:
           DEVENV_E2E: "1"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: devenv-minimal
-          path: devenv/.devenv/
+          path: devenv/cli/testdata/minimal/.devenv/
           include-hidden-files: true
   concurrent-test:
     runs-on: ubuntu-24.04
