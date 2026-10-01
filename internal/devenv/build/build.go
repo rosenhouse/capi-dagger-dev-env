@@ -66,13 +66,15 @@ func ModuleRoot(dir string) (string, error) {
 	}
 }
 
-// Images builds every command, with version in its main.version, and returns its image by name.
-func Images(c *dagger.Client, src *dagger.Directory, version string) map[string]*dagger.Container {
-	args := []string{"go", "build", "-trimpath", "-ldflags", "-X main.version=" + version, "-o", "/out/"}
+// Binaries builds every command, with version in its main.version. Its "built-at" file holds the
+// time of the build, which a cached build keeps.
+func Binaries(c *dagger.Client, src *dagger.Directory, version string) *dagger.Directory {
+	args := []string{"sh", "-c", `go build "$@" && date +%s%N > /out/built-at`, "go-build",
+		"-trimpath", "-ldflags", "-X main.version=" + version, "-o", "/out/"}
 	for _, name := range Commands {
 		args = append(args, "./cmd/"+name)
 	}
-	bin := c.Container().From(golangImage).
+	return c.Container().From(golangImage).
 		WithMountedCache("/go/pkg/mod", c.CacheVolume("devenv-go-mod")).
 		WithMountedCache("/root/.cache/go-build", c.CacheVolume("devenv-go-build")).
 		WithEnvVariable("CGO_ENABLED", "0").
@@ -80,7 +82,10 @@ func Images(c *dagger.Client, src *dagger.Directory, version string) map[string]
 		WithWorkdir("/src").
 		WithExec(args).
 		Directory("/out")
+}
 
+// Images packages each command in bin as an image, by name.
+func Images(c *dagger.Client, bin *dagger.Directory) map[string]*dagger.Container {
 	images := map[string]*dagger.Container{}
 	for _, name := range Commands {
 		images[name] = c.Container().From(baseImage).

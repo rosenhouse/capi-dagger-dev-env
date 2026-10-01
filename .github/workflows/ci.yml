@@ -45,3 +45,35 @@ jobs:
           name: devenv-${{ matrix.runner }}
           path: .devenv/
           include-hidden-files: true
+  concurrent-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Also starts the shared Dagger engine before two clients race to start it.
+      - run: go test ./internal/devenv/build/
+        env:
+          DEVENV_ENGINE_TESTS: "1"
+      - name: Two environments at once, one with a random name
+        run: |
+          go build -o /tmp/devenv ./cmd/devenv
+          df -h /
+          /tmp/devenv test --name a > a.log 2>&1 & a=$!
+          /tmp/devenv test > random.log 2>&1 & r=$!
+          status=0
+          wait $a || status=1
+          wait $r || status=1
+          sed 's/^/[a] /' a.log
+          sed 's/^/[random] /' random.log
+          df -h /
+          exit $status
+      - run: test "$(ls .devenv)" = a
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devenv-concurrent
+          path: .devenv/
+          include-hidden-files: true

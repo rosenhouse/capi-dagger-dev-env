@@ -74,6 +74,10 @@ func main() {
 				return err
 			}
 			fmt.Printf("Environment %s passed.\n", env.Name)
+			if o.Name == "" {
+				// Nothing could reuse a random name's cached Docker data.
+				return devenv.Purge(cmd.Context(), env.Env)
+			}
 			return nil
 		},
 	})
