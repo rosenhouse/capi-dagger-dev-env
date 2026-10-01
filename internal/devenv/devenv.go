@@ -185,7 +185,7 @@ func Machines(ctx context.Context, o Options) ([]smolvm.Machine, error) {
 	return o.SmolVM.List(ctx)
 }
 
-// Open holds the environment called o.Name, or the only running one. Its VM must be running.
+// Open holds the environment called o.Name, or the only one, or else the only running one. Its VM must be running.
 func Open(ctx context.Context, o Options) (*Environment, error) {
 	machines, err := Machines(ctx, o)
 	if err != nil {
@@ -281,8 +281,13 @@ func (e *Environment) stage(name string, run func() error) error {
 }
 
 // ExportLogs writes cluster logs and resources to the environment directory, as far as bring-up got.
+// After an interrupt, it does nothing, so that the VM's deletion follows at once.
 func (e *Environment) ExportLogs(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
+	if ctx.Err() != nil {
+		e.progress("interrupted, so not exporting logs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	if machines, err := e.opts.SmolVM.List(ctx); err != nil || e.VMState(machines) == "" {
 		return

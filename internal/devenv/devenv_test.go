@@ -2,11 +2,14 @@ package devenv
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -14,63 +17,117 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
-// TestMain lets the test binary stand in for smolvm: with FAKE_SMOLVM_CALLS set, it appends its arguments
-// there, prints FAKE_SMOLVM_LS for "machine ls --json", and prints FAKE_SMOLVM_VERSION for "--version".
+// TestMain lets the test binary stand in for smolvm when FAKE_SMOLVM_DIR is set.
 func TestMain(m *testing.M) {
-	if calls := os.Getenv("FAKE_SMOLVM_CALLS"); calls != "" {
-		f, err := os.OpenFile(calls, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Fprintln(f, strings.Join(os.Args[1:], " "))
-		f.Close()
-		switch strings.Join(os.Args[1:], " ") {
-		case "--version":
-			fmt.Println(os.Getenv("FAKE_SMOLVM_VERSION"))
-		case "machine ls --json":
-			fmt.Println(os.Getenv("FAKE_SMOLVM_LS"))
-		}
-		os.Exit(0)
+	if dir := os.Getenv("FAKE_SMOLVM_DIR"); dir != "" {
+		os.Exit(fakeSmolvmMain(dir, os.Args[1:]))
 	}
 	os.Exit(m.Run())
 }
 
-// fakeSmolvm returns options for an environment called alpha whose smolvm lists machines,
-// and a function that returns smolvm's calls so far.
-func fakeSmolvm(t *testing.T, machines func(state.Env) []smolvm.Machine) (Options, state.Env, func() []string) {
-	t.Helper()
-	o := Options{Name: "alpha", StateDir: t.TempDir(), SmolVM: smolvm.CLI{Path: os.Args[0]}}
-	env, err := state.New(o.StateDir, o.Name)
+// fakeSmolvmMain appends each call to dir/calls and keeps the machines in dir/machines.json.
+// It prints FAKE_SMOLVM_VERSION for --version, and fails calls that start with FAKE_SMOLVM_FAIL.
+func fakeSmolvmMain(dir string, args []string) int {
+	call := strings.Join(args, " ")
+	f, err := os.OpenFile(filepath.Join(dir, "calls"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	if err := os.MkdirAll(env.Dir, 0o700); err != nil {
-		t.Fatal(err)
+	fmt.Fprintln(f, call)
+	f.Close()
+	if fail := os.Getenv("FAKE_SMOLVM_FAIL"); fail != "" && strings.HasPrefix(call, fail) {
+		fmt.Fprintln(os.Stderr, "fake failure")
+		return 1
 	}
-	calls := filepath.Join(t.TempDir(), "calls")
-	t.Setenv("FAKE_SMOLVM_CALLS", calls)
-	t.Setenv("FAKE_SMOLVM_LS", lsJSON(machines(env)))
-	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm "+smolvm.Version)
-	return o, env, func() []string {
-		data, err := os.ReadFile(calls)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	machines := readMachines(dir)
+	name := ""
+	if i := slices.Index(args, "--name"); i >= 0 && i+1 < len(args) {
+		name = args[i+1]
+	}
+	named := func(m smolvm.Machine) bool { return m.Name == name }
+	switch {
+	case call == "--version":
+		fmt.Println(os.Getenv("FAKE_SMOLVM_VERSION"))
+	case call == "machine ls --json":
+		data, _ := json.Marshal(machines)
+		fmt.Println(string(data))
+	case strings.HasPrefix(call, "machine create "):
+		machines = append(machines, smolvm.Machine{Name: name, State: smolvm.Created})
+	case strings.HasPrefix(call, "machine start "):
+		machines[slices.IndexFunc(machines, named)].State = smolvm.Running
+	case strings.HasPrefix(call, "machine delete "):
+		machines = slices.DeleteFunc(machines, named)
+	}
+	writeMachines(dir, machines)
+	return 0
+}
+
+func readMachines(dir string) []smolvm.Machine {
+	var machines []smolvm.Machine
+	data, err := os.ReadFile(filepath.Join(dir, "machines.json"))
+	if err == nil {
+		err = json.Unmarshal(data, &machines)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		panic(err)
+	}
+	return machines
+}
+
+func writeMachines(dir string, machines []smolvm.Machine) {
+	data, err := json.Marshal(machines)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "machines.json"), data, 0o600); err != nil {
+		panic(err)
 	}
 }
 
-func lsJSON(machines []smolvm.Machine) string {
-	var items []string
-	for _, m := range machines {
-		items = append(items, fmt.Sprintf(`{"name": %q, "state": %q, "parent_machine": null}`, m.Name, m.State))
-	}
-	return "[" + strings.Join(items, ",") + "]"
+// fake is a fake smolvm and an environment called alpha.
+type fake struct {
+	o   Options
+	env state.Env
+	dir string
 }
+
+// fakeSmolvm starts a fake smolvm whose machines are those that machines returns for alpha.
+func fakeSmolvm(t *testing.T, machines func(state.Env) []smolvm.Machine) fake {
+	t.Helper()
+	f := fake{o: Options{Name: "alpha", StateDir: t.TempDir(), SmolVM: smolvm.CLI{Path: os.Args[0]}}, dir: t.TempDir()}
+	var err error
+	if f.env, err = state.New(f.o.StateDir, f.o.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(f.env.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeMachines(f.dir, machines(f.env))
+	t.Setenv("FAKE_SMOLVM_DIR", f.dir)
+	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm "+smolvm.Version)
+	return f
+}
+
+// calls returns smolvm's calls so far.
+func (f fake) calls(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.dir, "calls"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func (f fake) machines() []smolvm.Machine { return readMachines(f.dir) }
 
 func vm(s smolvm.State) func(state.Env) []smolvm.Machine {
 	return func(env state.Env) []smolvm.Machine {
@@ -78,6 +135,37 @@ func vm(s smolvm.State) func(state.Env) []smolvm.Machine {
 			return nil
 		}
 		return []smolvm.Machine{{Name: env.VM(), State: s}}
+	}
+}
+
+// fakeHost stands in for /dev/kvm and fills the download cache, so Up needs neither KVM nor the network.
+func fakeHost(t *testing.T) {
+	t.Helper()
+	device := filepath.Join(t.TempDir(), "kvm")
+	if err := os.WriteFile(device, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kvmDevice = device
+	t.Cleanup(func() { kvmDevice = "/dev/kvm" })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloads, err := infra.Downloads(runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range append(downloads, platform.Downloads()...) {
+		path := filepath.Join(cacheDir, "devenv", "downloads", "sha256", d.SHA256)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -91,24 +179,20 @@ func writeKubeconfigs(t *testing.T, env state.Env) {
 }
 
 func TestUpRefusesAnEnvironmentWhoseVMIsRunning(t *testing.T) {
-	device := filepath.Join(t.TempDir(), "kvm")
-	if err := os.WriteFile(device, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	kvmDevice = device
-	t.Cleanup(func() { kvmDevice = "/dev/kvm" })
-	o, env, calls := fakeSmolvm(t, vm(smolvm.Running))
+	fakeHost(t)
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	env := f.env
 	writeKubeconfigs(t, env)
 	if err := os.WriteFile(filepath.Join(env.Dir, "guest.log"), []byte("kind create cluster\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := Up(t.Context(), o)
+	_, err := Up(t.Context(), f.o)
 
 	if err == nil || !strings.Contains(err.Error(), "environment alpha is already up") {
 		t.Errorf("err = %v", err)
 	}
-	if got := calls(); !slices.Equal(got, []string{"--version", "machine ls --json"}) {
+	if got := f.calls(t); !slices.Equal(got, []string{"--version", "machine ls --json"}) {
 		t.Errorf("smolvm calls = %q", got)
 	}
 	if _, err := os.Stat(filepath.Join(env.Dir, "mgmt.kubeconfig")); err != nil {
@@ -119,9 +203,80 @@ func TestUpRefusesAnEnvironmentWhoseVMIsRunning(t *testing.T) {
 	}
 }
 
+func TestUpDeletesTheVMWhenBringUpFails(t *testing.T) {
+	fakeHost(t)
+	f := fakeSmolvm(t, vm(""))
+	t.Setenv("FAKE_SMOLVM_FAIL", "machine start")
+
+	_, err := Up(t.Context(), f.o)
+
+	if err == nil || !strings.Contains(err.Error(), `stage "VM"`) || !strings.Contains(err.Error(), "logs: "+f.env.Dir) {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.machines(); len(got) > 0 {
+		t.Errorf("machines after a failed up: %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(f.env.Dir, "ports.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ports.json: %v", err)
+	}
+}
+
+func TestUpReplacesALeftoverVMAndForgetsTheLastRun(t *testing.T) {
+	fakeHost(t)
+	f := fakeSmolvm(t, vm(smolvm.Stopped))
+	writeKubeconfigs(t, f.env)
+	if err := os.MkdirAll(filepath.Join(f.env.Dir, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.env.Dir, "logs", "last-run.log"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_SMOLVM_FAIL", "machine start")
+
+	if _, err := Up(t.Context(), f.o); err == nil {
+		t.Fatal("no error")
+	}
+
+	got := f.calls(t)
+	deleted, created := slices.Index(got, "machine delete --name "+f.env.VM()+" -f"), slices.IndexFunc(got, func(c string) bool {
+		return strings.HasPrefix(c, "machine create --name "+f.env.VM())
+	})
+	if deleted < 0 || created < deleted {
+		t.Errorf("smolvm calls = %q; want the leftover deleted before the create", got)
+	}
+	for _, name := range []string{"mgmt.kubeconfig", "workload.kubeconfig", "logs/last-run.log"} {
+		if _, err := os.Stat(filepath.Join(f.env.Dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestExportLogsSkipsAnInterruptedRun(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	var progress bytes.Buffer
+	f.o.Progress = &progress
+	e, err := open(f.env, f.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	e.ExportLogs(ctx)
+
+	if got := f.calls(t); len(got) > 0 {
+		t.Errorf("smolvm calls = %q", got)
+	}
+	if !strings.Contains(progress.String(), "interrupted") {
+		t.Errorf("progress = %q", progress.String())
+	}
+}
+
 func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
-	o, env, calls := fakeSmolvm(t, vm(smolvm.Stopped))
-	e, err := open(env, o)
+	f := fakeSmolvm(t, vm(smolvm.Stopped))
+	env := f.env
+	e, err := open(env, f.o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +290,7 @@ func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 	if err != nil || p != e.Ports {
 		t.Fatalf("recorded ports %+v, %v; want %+v", p, err, e.Ports)
 	}
-	got := calls()
+	got := f.calls(t)
 	if len(got) != 3 || got[0] != "machine delete --name "+env.VM()+" -f" || !strings.HasPrefix(got[2], "machine start --name "+env.VM()) {
 		t.Fatalf("smolvm calls = %q; want delete, create and start", got)
 	}
@@ -147,15 +302,19 @@ func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 }
 
 func TestDownDeletesTheVMAndKubeconfigs(t *testing.T) {
-	o, env, calls := fakeSmolvm(t, vm(smolvm.Running))
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	env := f.env
 	writeKubeconfigs(t, env)
 	var out bytes.Buffer
 
-	if err := Down(t.Context(), o, false, &out); err != nil {
+	if err := Down(t.Context(), f.o, false, &out); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := calls(); !slices.Contains(got, "machine delete --name "+env.VM()+" -f") {
+	if got := f.machines(); len(got) > 0 {
+		t.Errorf("machines after down: %+v", got)
+	}
+	if got := f.calls(t); !slices.Contains(got, "machine delete --name "+env.VM()+" -f") {
 		t.Errorf("smolvm calls = %q", got)
 	}
 	for _, name := range []string{"mgmt.kubeconfig", "workload.kubeconfig", "ports.json"} {
@@ -172,14 +331,15 @@ func TestDownDeletesTheVMAndKubeconfigs(t *testing.T) {
 }
 
 func TestDownPurgesTheStateOfAnEnvironmentWithoutAVM(t *testing.T) {
-	o, env, calls := fakeSmolvm(t, vm(""))
+	f := fakeSmolvm(t, vm(""))
+	env := f.env
 	var out bytes.Buffer
 
-	if err := Down(t.Context(), o, true, &out); err != nil {
+	if err := Down(t.Context(), f.o, true, &out); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := calls(); slices.ContainsFunc(got, func(c string) bool { return strings.Contains(c, "delete") }) {
+	if got := f.calls(t); slices.ContainsFunc(got, func(c string) bool { return strings.Contains(c, "delete") }) {
 		t.Errorf("smolvm calls = %q", got)
 	}
 	if _, err := os.Stat(env.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -190,16 +350,32 @@ func TestDownPurgesTheStateOfAnEnvironmentWithoutAVM(t *testing.T) {
 	}
 }
 
+func TestDownFindsANamedEnvironmentWhoseStateDirIsGone(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	if err := os.RemoveAll(f.o.StateDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Down(t.Context(), f.o, true, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := f.machines(); len(got) > 0 {
+		t.Errorf("machines after down: %+v", got)
+	}
+}
+
 func TestDownChecksSmolvmsVersion(t *testing.T) {
-	o, env, calls := fakeSmolvm(t, vm(smolvm.Running))
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	env := f.env
 	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm 1.21.0")
 
-	err := Down(t.Context(), o, true, &bytes.Buffer{})
+	err := Down(t.Context(), f.o, true, &bytes.Buffer{})
 
 	if err == nil || !strings.Contains(err.Error(), "want smolvm "+smolvm.Version) {
 		t.Errorf("err = %v", err)
 	}
-	if got := calls(); !slices.Equal(got, []string{"--version"}) {
+	if got := f.calls(t); !slices.Equal(got, []string{"--version"}) {
 		t.Errorf("smolvm calls = %q", got)
 	}
 	if _, err := os.Stat(env.Dir); err != nil {
@@ -208,14 +384,15 @@ func TestDownChecksSmolvmsVersion(t *testing.T) {
 }
 
 func TestDownWaitsForNoOtherCommand(t *testing.T) {
-	o, env, _ := fakeSmolvm(t, vm(smolvm.Running))
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	env := f.env
 	unlock, err := env.Lock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unlock()
 
-	err = Down(t.Context(), o, true, &bytes.Buffer{})
+	err = Down(t.Context(), f.o, true, &bytes.Buffer{})
 
 	if err == nil || !strings.Contains(err.Error(), "another devenv command is using environment alpha") {
 		t.Errorf("err = %v", err)
@@ -226,10 +403,11 @@ func TestDownWaitsForNoOtherCommand(t *testing.T) {
 }
 
 func TestOpenRequiresARunningVM(t *testing.T) {
-	o, env, _ := fakeSmolvm(t, vm(smolvm.Stopped))
+	f := fakeSmolvm(t, vm(smolvm.Stopped))
+	env := f.env
 	writeKubeconfigs(t, env)
 
-	_, err := Open(t.Context(), o)
+	_, err := Open(t.Context(), f.o)
 
 	if err == nil || !strings.Contains(err.Error(), "environment alpha is not running") {
 		t.Errorf("err = %v", err)
@@ -242,7 +420,8 @@ func TestOpenRequiresARunningVM(t *testing.T) {
 func TestRedeployRejectsVersionsThatLdflagsCannotTake(t *testing.T) {
 	e := &Environment{start: time.Now()}
 	for _, version := range []string{"it's", "a b"} {
-		if err := e.Redeploy(t.Context(), version); err == nil || !strings.Contains(err.Error(), "version") {
+		want := fmt.Sprintf("version %q is not letters, digits and ._+-", version)
+		if err := e.Redeploy(t.Context(), version); err == nil || err.Error() != want {
 			t.Errorf("%q: err = %v", version, err)
 		}
 	}
