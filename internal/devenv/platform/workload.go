@@ -14,20 +14,19 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 )
 
-// podCIDR is the default in CAPD's development cluster template.
 const podCIDR = "192.168.0.0/16"
 
 //go:embed kindnet.yaml
 var kindnet string
 
 // CreateWorkloadCluster applies CAPD's quick-start ClusterClass, a kindnet ClusterResourceSet, and one Cluster
-// with a control plane node and a worker node. The nodes pull from the session registry like the Kind node does.
+// with a control plane node and a worker node. The nodes read the containerd registry config the Kind node reads.
 func CreateWorkloadCluster(ctx context.Context, c *dagger.Client, inf *infra.Infra, name, namespace string) error {
 	clusterClass, err := releaseFile(c, "clusterclass-quick-start.yaml").Contents(ctx)
 	if err != nil {
 		return err
 	}
-	patched, err := withExtraMount([]byte(clusterClass), infra.ContainerdCertsDir, "/etc/containerd/certs.d")
+	patched, err := patchClusterClass([]byte(clusterClass), namespace, infra.ContainerdCertsDir, "/etc/containerd/certs.d")
 	if err != nil {
 		return err
 	}
@@ -38,15 +37,18 @@ func CreateWorkloadCluster(ctx context.Context, c *dagger.Client, inf *infra.Inf
 	if err := Apply(ctx, inf, append(append(patched, "\n---\n"...), crs...)); err != nil {
 		return err
 	}
-	_, err = inf.Run(ctx, func(t *dagger.Container) *dagger.Container { return t.WithDirectory("/repo", clusterctlRepository(c)) },
+	_, err = inf.Run(ctx, func(t *dagger.Container) *dagger.Container {
+		return t.WithDirectory("/repo", clusterctlRepository(c)).WithEnvVariable("POD_CIDR", fmt.Sprintf("[%q]", podCIDR))
+	},
 		fmt.Sprintf(`clusterctl generate cluster %[1]s --config /repo/clusterctl.yaml --from /repo/infrastructure-docker/%[3]s/cluster-template-development.yaml \
   --kubernetes-version %[4]s --control-plane-machine-count 1 --worker-machine-count 1 --target-namespace %[2]s | kubectl apply -f - &&
 kubectl -n %[2]s label cluster %[1]s cni=kindnet --overwrite`, name, namespace, CAPIVersion, infra.KubernetesVersion))
 	return err
 }
 
-// withExtraMount adds a host mount to the node containers of every DevMachineTemplate in manifests.
-func withExtraMount(manifests []byte, hostPath, containerPath string) ([]byte, error) {
+// patchClusterClass puts every object in manifests into namespace, and adds a host mount
+// to the node containers of every DevMachineTemplate.
+func patchClusterClass(manifests []byte, namespace, hostPath, containerPath string) ([]byte, error) {
 	docs := strings.Split(string(manifests), "\n---\n")
 	patched := 0
 	for i, doc := range docs {
@@ -54,7 +56,15 @@ func withExtraMount(manifests []byte, hostPath, containerPath string) ([]byte, e
 		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
 			return nil, err
 		}
+		if err := unstructured.SetNestedField(obj, namespace, "metadata", "namespace"); err != nil {
+			return nil, err
+		}
 		if obj["kind"] != "DevMachineTemplate" {
+			out, err := yaml.Marshal(obj)
+			if err != nil {
+				return nil, err
+			}
+			docs[i] = string(out)
 			continue
 		}
 		path := []string{"spec", "template", "spec", "backend", "docker", "extraMounts"}

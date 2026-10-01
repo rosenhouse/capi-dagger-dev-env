@@ -46,3 +46,16 @@ func hasTrueCondition(obj unstructured.Unstructured, conditionType string) bool 
 	}
 	return false
 }
+
+// PackageInstallReconciled returns nil when the named PackageInstall reports ReconcileSucceeded.
+func PackageInstallReconciled(ctx context.Context, dyn dynamic.Interface, namespace, name string) error {
+	pkgi, err := dyn.Resource(PackageInstallGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if hasTrueCondition(*pkgi, "ReconcileSucceeded") {
+		return nil
+	}
+	msg, _, _ := unstructured.NestedString(pkgi.Object, "status", "usefulErrorMessage")
+	return fmt.Errorf("PackageInstall %s/%s not reconciled: %s", namespace, name, msg)
+}

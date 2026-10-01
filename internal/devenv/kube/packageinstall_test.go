@@ -53,3 +53,14 @@ func fakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{kube.PackageInstallGVR: "PackageInstallList"}, objs...)
 }
+
+func TestPackageInstallReconciledChecksOnlyTheNamedInstall(t *testing.T) {
+	dyn := fakeDynamic(packageInstall("other", "ReconcileFailed", "unrelated"), packageInstall("work-greeting-controller", "ReconcileSucceeded", ""))
+	if err := kube.PackageInstallReconciled(context.Background(), dyn, "devenv", "work-greeting-controller"); err != nil {
+		t.Error(err)
+	}
+	err := kube.PackageInstallReconciled(context.Background(), dyn, "devenv", "other")
+	if err == nil || err.Error() != "PackageInstall devenv/other not reconciled: unrelated" {
+		t.Errorf("err = %v", err)
+	}
+}

@@ -37,8 +37,8 @@ spec:
         docker: {}
 `
 
-func TestWithExtraMountAddsMountToEveryMachineTemplate(t *testing.T) {
-	out, err := withExtraMount([]byte(clusterClass), "/etc/devenv/certs.d", "/etc/containerd/certs.d")
+func TestPatchClusterClassAddsMountToEveryMachineTemplate(t *testing.T) {
+	out, err := patchClusterClass([]byte(clusterClass), "team-a", "/etc/devenv/certs.d", "/etc/containerd/certs.d")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +61,24 @@ func TestWithExtraMountAddsMountToEveryMachineTemplate(t *testing.T) {
 	}
 }
 
-func TestWithExtraMountFailsWithoutMachineTemplates(t *testing.T) {
-	if _, err := withExtraMount([]byte("kind: ClusterClass\n"), "/a", "/b"); err == nil {
+func TestPatchClusterClassSetsNamespaceOnEveryObject(t *testing.T) {
+	out, err := patchClusterClass([]byte(clusterClass), "team-a", "/a", "/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, doc := range strings.Split(string(out), "\n---\n") {
+		var obj map[string]any
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil {
+			t.Fatal(err)
+		}
+		if ns := obj["metadata"].(map[string]any)["namespace"]; ns != "team-a" {
+			t.Errorf("document %d namespace = %v", i, ns)
+		}
+	}
+}
+
+func TestPatchClusterClassFailsWithoutMachineTemplates(t *testing.T) {
+	if _, err := patchClusterClass([]byte("kind: ClusterClass\nmetadata:\n  name: x\n"), "default", "/a", "/b"); err == nil {
 		t.Error("no error")
 	}
 }
