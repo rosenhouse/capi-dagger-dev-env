@@ -1,0 +1,80 @@
+name: spike-restore
+on:
+  pull_request:
+    branches: [smol, 'spike/**']
+    paths:
+      - .github/workflows/spike-restore.yml
+      - hack/spike/restore/**
+  workflow_dispatch:
+concurrency:
+  group: spike-restore-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  SMOLVM_VERSION: 1.22.0
+  SMOLVM_IDLE_RECLAIM: "off"
+jobs:
+  env:
+    name: ${{ matrix.mode }} ${{ matrix.prep }} thp=${{ matrix.thp }} ${{ matrix.rep }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { mode: restore, prep: zero-fill, thp: never, rep: 1 }
+          - { mode: restore, prep: zero-fill, thp: never, rep: 2 }
+          - { mode: restore, prep: zero-fill, thp: never, rep: 3 }
+          - { mode: branch, prep: zero-fill, thp: never, rep: 1 }
+          - { mode: branch, prep: zero-fill, thp: never, rep: 2 }
+          - { mode: branch, prep: zero-fill, thp: never, rep: 3 }
+          - { mode: branch-copy, prep: zero-fill, thp: never, rep: 1 }
+          - { mode: branch-copy, prep: zero-fill, thp: never, rep: 2 }
+          - { mode: restore, prep: none, thp: never, rep: 1 }
+          - { mode: restore, prep: none, thp: never, rep: 2 }
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./hack/spike/platform/setup
+        with:
+          shmem-thp: ${{ matrix.thp }}
+      - run: hack/spike/platform/run.sh host-tools
+      - name: Boot a bare VM and install tools
+        run: hack/spike/platform/run.sh boot
+      - name: Start dockerd
+        run: hack/spike/platform/run.sh docker
+      - name: Session registry and Kind management cluster
+        run: hack/spike/platform/run.sh mgmt
+      - name: Cluster API, kapp-controller and the workload cluster
+        run: hack/spike/platform/run.sh platform
+      - name: Start the samplers and watch plat at rest
+        run: hack/spike/restore/run.sh observe
+      - name: Checkpoint plat (${{ matrix.prep }}) and watch it afterwards
+        run: hack/spike/restore/run.sh capture ${{ matrix.prep }}
+      - run: hack/spike/restore/run.sh retire
+      - if: matrix.mode == 'restore'
+        name: Restore env and wait for the gates
+        run: hack/spike/restore/run.sh restore
+      - if: matrix.mode == 'restore'
+        name: Restore env2 from the same checkpoint while env runs
+        run: hack/spike/restore/run.sh second
+      - if: matrix.mode != 'restore'
+        name: Restore src, branch env from it and wait for the gates
+        run: hack/spike/restore/run.sh branch ${{ matrix.mode }}
+      - if: always()
+        run: hack/spike/restore/run.sh report
+      - if: always()
+        run: hack/spike/platform/run.sh summary
+      - if: always()
+        run: hack/spike/restore/run.sh summary
+      - if: failure()
+        run: hack/spike/platform/run.sh diag
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-${{ matrix.mode }}-${{ matrix.prep }}-${{ matrix.thp }}-${{ matrix.rep }}
+          path: |
+            ${{ runner.temp }}/restore/
+            ${{ runner.temp }}/platform/
+            !${{ runner.temp }}/platform/bin/
+            !${{ runner.temp }}/platform/*.tgz
+            !${{ runner.temp }}/**/*.kubeconfig
+          retention-days: 7
