@@ -24,24 +24,74 @@ type Registry struct {
 
 // StartRegistry starts the session registry that holds first-party images and bundles.
 func StartRegistry(ctx context.Context, c *dagger.Client) (*Registry, error) {
-	svc, err := c.Container().From(registryImage).WithExposedPort(5000).AsService().Start(ctx)
+	host, err := startRegistryService(ctx, c, c.Container().From(registryImage))
 	if err != nil {
 		return nil, err
+	}
+	return &Registry{Host: host, crane: c.Container().From(craneImage).With(InSession)}, nil
+}
+
+// Upstreams maps each registry that nodes pull from to its URL.
+var Upstreams = map[string]string{
+	"docker.io":       "https://registry-1.docker.io",
+	"registry.k8s.io": "https://registry.k8s.io",
+	"ghcr.io":         "https://ghcr.io",
+	"quay.io":         "https://quay.io",
+}
+
+// Mirrors maps each upstream in Upstreams to the host:port of its pull-through mirror.
+type Mirrors map[string]string
+
+// StartMirrors starts a pull-through mirror for each upstream. Mirror storage persists across sessions and environments.
+func StartMirrors(ctx context.Context, c *dagger.Client) (Mirrors, error) {
+	mirrors := Mirrors{}
+	for name, url := range Upstreams {
+		host, err := startRegistryService(ctx, c, c.Container().From(registryImage).
+			WithEnvVariable("REGISTRY_PROXY_REMOTEURL", url).
+			WithMountedCache("/var/lib/registry", c.CacheVolume("devenv-mirror-"+name),
+				dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeShared}))
+		if err != nil {
+			return nil, fmt.Errorf("mirror %s: %w", name, err)
+		}
+		mirrors[name] = host
+	}
+	return mirrors, nil
+}
+
+// startRegistryService starts ctr as a registry on port 5000 and returns its FQDN and port.
+func startRegistryService(ctx context.Context, c *dagger.Client, ctr *dagger.Container) (string, error) {
+	svc, err := ctr.WithExposedPort(5000).AsService().Start(ctx)
+	if err != nil {
+		return "", err
 	}
 	name, err := svc.Hostname(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	crane := c.Container().From(craneImage).With(InSession)
-	resolvConf, err := crane.WithExec([]string{"cat", "/etc/resolv.conf"}).Stdout(ctx)
+	resolvConf, err := c.Container().From(craneImage).
+		With(InSession).
+		WithExec([]string{"cat", "/etc/resolv.conf"}).
+		Stdout(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	domain, err := sessionDomain(resolvConf)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &Registry{Host: name + "." + domain + ":5000", crane: crane}, nil
+	return name + "." + domain + ":5000", nil
+}
+
+// Catalog lists the repositories in the registry at host.
+func (r *Registry) Catalog(ctx context.Context, host string) (string, error) {
+	return r.crane.
+		WithExec([]string{"crane", "catalog", "--insecure", host}).
+		Stdout(ctx)
+}
+
+// hostsTOML renders containerd registry config that tries mirror, then falls back to server.
+func hostsTOML(server, mirror string) string {
+	return fmt.Sprintf("server = %q\n\n[host.%q]\n  capabilities = [\"pull\", \"resolve\"]\n", server, "http://"+mirror)
 }
 
 // Push pushes ctr to repo and returns its digest reference.
