@@ -53,3 +53,33 @@ func TestWaitStopsWhenContextIsCanceled(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+func TestWaitRetriesAnAttemptThatHangs(t *testing.T) {
+	calls := 0
+	g := ready.Gate{Name: "port-forward", Timeout: time.Second, Interval: time.Millisecond, Attempt: 20 * time.Millisecond,
+		Check: func(ctx context.Context) error {
+			calls++
+			if calls == 1 {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		}}
+
+	if err := ready.Wait(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2", calls)
+	}
+}
+
+func TestWaitLeavesChecksUnboundedWithoutAttempt(t *testing.T) {
+	g := ready.Gate{Name: "nodes ready", Timeout: time.Second, Interval: time.Millisecond, Check: func(ctx context.Context) error {
+		return ctx.Err()
+	}}
+
+	if err := ready.Wait(context.Background(), g); err != nil {
+		t.Error(err)
+	}
+}

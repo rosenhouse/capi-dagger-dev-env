@@ -27,4 +27,5 @@ Each environment keeps its kubeconfigs and logs in `.devenv/<name>/`.
 Without `--name`, `kubeconfig`, `redeploy` and `down` act on the only environment, or else the only running one.
 Reusing a name with `--name` reuses that environment's cached images.
 API server tunnels listen on all host interfaces.
+A tunnel stalls while any connection through it stays open with data unread, for example from a suspended `kubectl`. It recovers about 30 seconds after that connection closes.
 A failure names the stage and the readiness gate that failed.

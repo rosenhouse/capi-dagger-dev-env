@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +31,7 @@ import (
 // Every cluster here runs both in kube-system.
 func KubectlWorks(ctx context.Context, kubeconfig string) error {
 	return ready.Wait(ctx, ready.Gate{
-		Name: "kubectl logs, exec and port-forward work through " + kubeconfig, Timeout: 2 * time.Minute, Interval: 3 * time.Second,
+		Name: "kubectl logs, exec and port-forward work through " + kubeconfig, Timeout: 3 * time.Minute, Interval: 3 * time.Second, Attempt: 30 * time.Second,
 		Check: func(ctx context.Context) error { return kubectlWorks(ctx, kubeconfig) },
 	})
 }
@@ -38,17 +41,32 @@ func kubectlWorks(ctx context.Context, kubeconfig string) error {
 	if err != nil {
 		return err
 	}
+	api, err := url.Parse(cfg.Host)
+	if err != nil {
+		return err
+	}
+	proxy, stop, err := closingProxy(api.Host)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	// Some steps ignore their context, so the proxy closes when the context ends, not when they return.
+	context.AfterFunc(ctx, stop)
+	if cfg.TLSClientConfig.ServerName == "" {
+		cfg.TLSClientConfig.ServerName = api.Hostname()
+	}
+	cfg.Host = api.Scheme + "://" + proxy
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return err
 	}
 	coredns, err := firstPod(ctx, cs, "k8s-app=kube-dns")
 	if err != nil {
-		return err
+		return fmt.Errorf("list CoreDNS pods: %w", err)
 	}
 	etcd, err := firstPod(ctx, cs, "component=etcd")
 	if err != nil {
-		return err
+		return fmt.Errorf("list etcd pods: %w", err)
 	}
 	if _, err := cs.CoreV1().Pods("kube-system").GetLogs(coredns, &corev1.PodLogOptions{TailLines: ptr.To[int64](1)}).DoRaw(ctx); err != nil {
 		return fmt.Errorf("logs %s: %w", coredns, err)
@@ -154,4 +172,61 @@ func portForwardHealth(ctx context.Context, cfg *rest.Config, cs *kubernetes.Cli
 // upgradeFailed tells the fallbacks, as in kubectl, when to retry over SPDY.
 func upgradeFailed(err error) bool {
 	return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+}
+
+// closingProxy forwards connections to target until stop, which closes all of them.
+// A Dagger host tunnel stalls while any of its connections leaves data unread, and some
+// client-go streaming paths ignore their context, so a hung attempt must not leave connections open.
+func closingProxy(target string) (addr string, stop func(), err error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", nil, err
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	stopped := false
+	keep := func(c net.Conn) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
+			c.Close()
+			return false
+		}
+		conns = append(conns, c)
+		return true
+	}
+	go func() {
+		for {
+			client, err := l.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", target)
+			if err != nil {
+				client.Close()
+				continue
+			}
+			if !keep(client) || !keep(upstream) {
+				upstream.Close()
+				return
+			}
+			// Either side closing closes both, so no connection outlives its peer with data unread.
+			pipe := func(dst, src net.Conn) {
+				defer dst.Close()
+				defer src.Close()
+				_, _ = io.Copy(dst, src)
+			}
+			go pipe(upstream, client)
+			go pipe(client, upstream)
+		}
+	}()
+	return l.Addr().String(), func() {
+		l.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		stopped = true
+		for _, c := range conns {
+			c.Close()
+		}
+	}, nil
 }
