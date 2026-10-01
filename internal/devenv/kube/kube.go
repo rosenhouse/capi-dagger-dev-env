@@ -6,17 +6,32 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// requestTimeout bounds each request, because smolvm accepts a connection on a published port before the guest answers it.
+var requestTimeout = 30 * time.Second
+
+// Config returns a client config, whose requests time out, for the kubeconfig at path.
+func Config(path string) (*rest.Config, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Timeout = requestTimeout
+	return cfg, nil
+}
+
 // Client returns a clientset for the kubeconfig at path.
 func Client(path string) (kubernetes.Interface, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", path)
+	cfg, err := Config(path)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +70,7 @@ func isReady(n corev1.Node) bool {
 
 // Dynamic returns a dynamic client for the kubeconfig at path.
 func Dynamic(path string) (dynamic.Interface, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", path)
+	cfg, err := Config(path)
 	if err != nil {
 		return nil, err
 	}
