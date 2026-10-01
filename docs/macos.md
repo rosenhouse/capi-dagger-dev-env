@@ -9,8 +9,7 @@ If a browser downloaded it, clear the quarantine with `xattr -dr com.apple.quara
 
 ## Checklist
 
-This checklist predates smolvm and needs revalidation.
-Run these from a clean checkout and report the results on #13.
+To validate devenv on smolvm, run these from a clean checkout and report the results on #13.
 
 1. `time go run ./cmd/devenv test --name mac` exits 0.
 2. Run it again and note both times; the second should skip the downloads.
