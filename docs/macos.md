@@ -2,14 +2,14 @@
 
 On Apple Silicon, smolvm runs each environment's VM with Hypervisor.framework.
 The VM has the host's architecture, so images build for arm64.
-CI covers only x86_64 Linux, and devenv on smolvm has not been run on macOS yet.
+CI covers only x86_64 Linux.
 
 smolvm's macOS binary is ad-hoc signed and not notarized.
 If a browser downloaded it, clear the quarantine with `xattr -dr com.apple.quarantine` on its directory.
 
 ## Checklist
 
-To validate devenv on smolvm, run these from a clean checkout and report the results on #13.
+To validate devenv on smolvm, run these from a clean checkout and report the results on #32.
 
 1. `time go run ./cmd/devenv test --name mac` exits 0.
 2. Run it again and note both times; the second should skip the downloads.
