@@ -39,6 +39,8 @@ type Mirrors map[string]*Registry
 //
 // Mirror storage persists across sessions, and environments running at once share it. Concurrent
 // registry processes write blobs safely, but can race on tag links; a reader that hits one falls back to upstream.
+// They also rewrite one scheduler-state.json every few seconds, so a mirror starting mid-write can fail to start,
+// and expiry entries can be lost.
 func StartRegistries(ctx context.Context, c *dagger.Client) (*Registry, Mirrors, error) {
 	resolvConf, err := c.Container().From(craneImage).With(InSession).WithExec([]string{"cat", "/etc/resolv.conf"}).Stdout(ctx)
 	if err != nil {

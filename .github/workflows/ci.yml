@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go test ./internal/devenv/build/
+      - run: go test ./internal/devenv/build/ ./internal/devenv/infra/
         env:
           DEVENV_ENGINE_TESTS: "1"
       - run: go run ./cmd/devenv test --name ci
@@ -53,22 +53,18 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      # Also starts the shared Dagger engine before two clients race to start it.
-      - run: go test ./internal/devenv/build/
-        env:
-          DEVENV_ENGINE_TESTS: "1"
       - name: Two environments at once, one with a random name
+        shell: bash
+        timeout-minutes: 25
         run: |
           go build -o /tmp/devenv ./cmd/devenv
-          df -h /
-          /tmp/devenv test --name a > a.log 2>&1 & a=$!
-          /tmp/devenv test > random.log 2>&1 & r=$!
+          (while sleep 5; do df --output=used -B1G / | tail -1; done > df.log) &
+          /tmp/devenv test --name a 2>&1 | sed -u 's/^/[a] /' & a=$!
+          /tmp/devenv test 2>&1 | sed -u 's/^/[random] /' & r=$!
           status=0
           wait $a || status=1
           wait $r || status=1
-          sed 's/^/[a] /' a.log
-          sed 's/^/[random] /' random.log
-          df -h /
+          echo "Peak disk use: $(sort -n df.log | tail -1) GB of $(df --output=size -B1G / | tail -1) GB"
           exit $status
       - run: test "$(ls .devenv)" = a
       - if: failure()
