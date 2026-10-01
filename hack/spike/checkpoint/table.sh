@@ -3,7 +3,7 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 rows=$(cat "$@")
-short() { sed -E 's/linux-kvm-intel-portable-v1/intel/; s/exact-v1-(.{8}).*/exact:\1/'; }
+short() { sed -E 's/linux-kvm-intel-portable-v1/intel/g; s/exact-v1-([0-9a-f]{8})[0-9a-f]*/exact:\1/g'; }
 
 summary "### Restores: ok / attempted, by capture host → restore host"
 summary ""
