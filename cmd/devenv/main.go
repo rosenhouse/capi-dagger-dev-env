@@ -47,9 +47,23 @@ func main() {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
+			random := o.Name == ""
+			if random {
+				env, err := state.New(o.StateDir, "")
+				if err != nil {
+					return err
+				}
+				o.Name = env.Name
+			}
+			cleanUp := func(err error) error {
+				if random {
+					return fmt.Errorf("%w\nclean up: devenv down --purge --name %s", err, o.Name)
+				}
+				return err
+			}
 			env, err := devenv.Up(ctx, o)
 			if err != nil {
-				return err
+				return cleanUp(err)
 			}
 			testErr := env.Verify(ctx)
 			if testErr == nil {
@@ -66,13 +80,10 @@ func main() {
 			}
 			if testErr != nil {
 				env.ExportLogs(ctx)
-				testErr = fmt.Errorf("%w\nlogs: %s", testErr, env.Dir)
-				if o.Name == "" {
-					testErr = fmt.Errorf("%w\nclean up: devenv down --purge --name %s", testErr, env.Name)
-				}
+				testErr = cleanUp(fmt.Errorf("%w\nlogs: %s", testErr, env.Dir))
 			}
 			// Nothing reuses a random name's state once it passes.
-			_, deleteErr := env.Delete(ctx, o.Name == "" && testErr == nil)
+			_, deleteErr := env.Delete(ctx, random && testErr == nil)
 			if err := errors.Join(testErr, deleteErr, env.Close()); err != nil {
 				return err
 			}
