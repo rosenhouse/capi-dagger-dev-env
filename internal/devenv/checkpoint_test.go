@@ -1,6 +1,7 @@
 package devenv
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
 // The code that shapes the platform: the packages that run the VM and install the platform,
@@ -241,4 +243,60 @@ func marshal(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func TestSavePlatformDeletesTheVMItCaptured(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	fakeHost(t, f)
+	bringUpPlatform = func(e *Environment, ctx context.Context, _ smolvm.State, _ func(), _ bool) error {
+		return e.opts.SmolVM.Create(ctx, e.VM(), smolvm.MachineConfig{})
+	}
+	capturePlatform = func(_ *Environment, _ context.Context, file string) error {
+		writeCheckpoint(t, file, captured...)
+		return nil
+	}
+	t.Cleanup(func() { bringUpPlatform, capturePlatform = (*Environment).coldPlatform, (*Environment).capture })
+
+	if _, err := SavePlatform(t.Context(), f.o, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if machines := f.machines(); len(machines) > 0 {
+		t.Errorf("machines = %+v; want the captured VM deleted", machines)
+	}
+}
+
+func TestSavePlatformWaitsForARestoreBeforeReplacingCheckpoints(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	fakeHost(t, f)
+	old := fakeCheckpoint(t, f)
+	before, err := os.Stat(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bringUpPlatform = func(*Environment, context.Context, smolvm.State, func(), bool) error { return nil }
+	capturePlatform = func(_ *Environment, _ context.Context, file string) error {
+		writeCheckpoint(t, file, captured...)
+		return nil
+	}
+	t.Cleanup(func() { bringUpPlatform, capturePlatform = (*Environment).coldPlatform, (*Environment).capture })
+	unlock, err := state.TryLock(filepath.Join(f.o.CacheDir, "restore.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := make(chan error, 1)
+	go func() { _, err := SavePlatform(context.Background(), f.o, true); saved <- err }()
+
+	select {
+	case err := <-saved:
+		t.Fatalf("SavePlatform returned %v while another environment restored", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if now, err := os.Stat(old); err != nil || !os.SameFile(before, now) {
+		t.Errorf("%s was replaced (%v) while another environment restored", old, err)
+	}
+	unlock()
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
 }

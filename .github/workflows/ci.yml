@@ -110,7 +110,7 @@ jobs:
           KEY: ${{ steps.cache.outputs.key }}
         run: |
           gh cache list --ref "$GITHUB_REF" --key devenv-platform- --limit 100 --json id,key --jq ".[] | select(.key != \"$KEY\") | .id" |
-            while read -r id; do gh cache delete "$id"; done
+            while read -r id; do gh cache delete "$id" || true; done
       - name: Summary
         if: always() && steps.cpu.outputs.publish == 'true'
         env:
@@ -142,7 +142,7 @@ jobs:
   # On smol, devenv and concurrent wait for platform, so that they restore what it published.
   devenv:
     needs: platform
-    if: ${{ !cancelled() && !failure() }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -268,7 +268,7 @@ jobs:
           include-hidden-files: true
   concurrent:
     needs: platform
-    if: ${{ !cancelled() && !failure() }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:

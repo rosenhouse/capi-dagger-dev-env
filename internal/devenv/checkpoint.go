@@ -187,6 +187,9 @@ func removeIfExists(path string) error {
 // platformSaveEnv is the environment that SavePlatform captures.
 func (o Options) platformSaveEnv() (state.Env, error) { return state.New(o.CacheDir, "platform-save") }
 
+// bringUpPlatform and capturePlatform are variables so that tests can stand in for a VM.
+var bringUpPlatform, capturePlatform = (*Environment).coldPlatform, (*Environment).capture
+
 // SavePlatform brings up the platform in a new VM, captures it as this host's platform checkpoint, and deletes the VM.
 // It refuses to replace a checkpoint unless replace is set.
 func SavePlatform(ctx context.Context, o Options, replace bool) (string, error) {
@@ -214,11 +217,16 @@ func SavePlatform(ctx context.Context, o Options, replace bool) (string, error) 
 		err = e.forget()
 	}
 	if err == nil {
-		err = e.coldPlatform(ctx, e.VMState(machines), func() {}, true)
+		err = bringUpPlatform(e, ctx, e.VMState(machines), func() {}, true)
 	}
 	var path string
 	if err == nil {
-		path, err = cache.save(in, func(file string) error { return e.capture(ctx, file) })
+		// Replacing or removing a checkpoint fails a restore that is verifying it.
+		var unlock func()
+		if unlock, err = e.hostLock(ctx, "restore"); err == nil {
+			path, err = cache.save(in, func(file string) error { return capturePlatform(e, ctx, file) })
+			unlock()
+		}
 	}
 	if err != nil {
 		return "", errors.Join(e.fail(ctx, err), e.Close())

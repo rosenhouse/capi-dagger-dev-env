@@ -13,6 +13,12 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 )
 
+// The workload Cluster's name and namespace in the management cluster.
+const (
+	WorkloadCluster   = "work"
+	WorkloadNamespace = "default"
+)
+
 const (
 	podCIDR = "192.168.0.0/16"
 	// nodeCertsDir is where containerd in a CAPD node reads registry config.
