@@ -1,0 +1,91 @@
+name: spike-checkpoint
+on:
+  pull_request:
+    branches: [smol]
+    paths:
+      - .github/workflows/spike-checkpoint.yml
+      - hack/spike/checkpoint/**
+  workflow_dispatch:
+concurrency:
+  group: spike-checkpoint-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  SMOLVM_VERSION: 1.22.0
+  SMOLVM_IDLE_RECLAIM: "off"
+jobs:
+  mechanics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: hack/spike/checkpoint/setup.sh
+      - run: hack/spike/checkpoint/mechanics.sh
+      - if: failure()
+        run: hack/spike/checkpoint/diag.sh diag
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-mechanics
+          path: diag
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v5
+      - run: hack/spike/checkpoint/setup.sh
+      - run: hack/spike/checkpoint/capture.sh "ckpt-${{ matrix.shard }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ckpt-${{ matrix.shard }}
+          path: ckpt-${{ matrix.shard }}
+          compression-level: 0
+      - if: failure()
+        run: hack/spike/checkpoint/diag.sh diag
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-capture-${{ matrix.shard }}
+          path: diag
+  restore:
+    needs: capture
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@v5
+      - run: hack/spike/checkpoint/setup.sh
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ckpt-*
+          path: ckpts
+      - run: hack/spike/checkpoint/restore.sh ckpts rows.tsv diag
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rows-${{ matrix.shard }}
+          path: rows.tsv
+      - if: always()
+        run: hack/spike/checkpoint/diag.sh diag
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-restore-${{ matrix.shard }}
+          path: diag
+  matrix:
+    needs: restore
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rows-*
+          path: rows
+      - run: hack/spike/checkpoint/table.sh rows/*/rows.tsv
