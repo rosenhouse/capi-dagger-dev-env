@@ -224,7 +224,7 @@ func (e *Environment) Redeploy(ctx context.Context, version string) error {
 		return fmt.Errorf("version %q is not letters, digits and ._+-", version)
 	}
 	var b build
-	if err := e.stage("build images and bundles", func() (err error) { b, err = e.build(ctx, version); return err }); err != nil {
+	if err := e.stage("build images", func() (err error) { b, err = e.build(ctx, version); return err }); err != nil {
 		return err
 	}
 	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
