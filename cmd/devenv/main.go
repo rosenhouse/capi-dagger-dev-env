@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/e2e"
 )
 
 func main() {
@@ -45,12 +46,15 @@ func main() {
 			if err != nil {
 				return err
 			}
-			verifyErr := env.Verify(cmd.Context())
-			if verifyErr != nil {
-				env.ExportLogs()
-				verifyErr = fmt.Errorf("verify: %w\nlogs: %s", verifyErr, env.Dir)
+			testErr := env.Verify(cmd.Context())
+			if testErr == nil {
+				testErr = e2e.GreetingReachesWorkloadCluster(cmd.Context(), env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
 			}
-			if err := errors.Join(verifyErr, env.Close()); err != nil {
+			if testErr != nil {
+				env.ExportLogs()
+				testErr = fmt.Errorf("%w\nlogs: %s", testErr, env.Dir)
+			}
+			if err := errors.Join(testErr, env.Close()); err != nil {
 				return err
 			}
 			fmt.Printf("Environment %s passed.\n", env.Name)
