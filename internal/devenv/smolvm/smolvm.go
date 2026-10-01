@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -60,7 +61,8 @@ func (c CLI) output(ctx context.Context, args ...string) (string, error) {
 
 func (c CLI) run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, cmp.Or(c.Path, "smolvm"), args...)
-	// SIGINT lets smolvm kill the VM once its agent is up. Before that, either signal leaves the VM running.
+	// A terminal's Ctrl-C reaches only devenv, which decides what to cancel.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = waitDelay
 	var tail tail
@@ -98,8 +100,11 @@ func commandLine(args []string) string {
 		args = args[:min(i+2, len(args))]
 	}
 	args = slices.Clone(args)
-	for i := 1; i < len(args); i++ {
-		if args[i-1] == "-e" {
+	for i := range args {
+		switch {
+		case args[i] == "":
+			args[i] = `""`
+		case i > 0 && args[i-1] == "-e":
 			args[i], _, _ = strings.Cut(args[i], "=")
 		}
 	}

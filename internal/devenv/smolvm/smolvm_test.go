@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,19 +20,19 @@ import (
 )
 
 // TestMain lets the test binary stand in for smolvm: with FAKE_SMOLVM_CALL set, it records its
-// arguments and stdin there and replies with FAKE_SMOLVM_STDOUT, FAKE_SMOLVM_STDERR and FAKE_SMOLVM_EXIT.
+// arguments, stdin and process group there and replies with FAKE_SMOLVM_STDOUT, FAKE_SMOLVM_STDERR and FAKE_SMOLVM_EXIT.
 func TestMain(m *testing.M) {
 	if path := os.Getenv("FAKE_SMOLVM_CALL"); path != "" {
 		onInterrupt := os.Getenv("FAKE_SMOLVM_ON_INTERRUPT")
 		interrupted := make(chan os.Signal, 1)
 		switch onInterrupt {
-		case "exit":
+		case "exit", "finish":
 			signal.Notify(interrupted, os.Interrupt)
 		case "ignore":
 			signal.Ignore(os.Interrupt)
 		}
 		stdin, _ := io.ReadAll(os.Stdin)
-		call, _ := json.Marshal(fakeCall{Args: os.Args[1:], Stdin: string(stdin)})
+		call, _ := json.Marshal(fakeCall{Args: os.Args[1:], Stdin: string(stdin), Pgid: syscall.Getpgrp()})
 		if err := os.WriteFile(path, call, 0o644); err != nil {
 			panic(err)
 		}
@@ -44,6 +45,16 @@ func TestMain(m *testing.M) {
 			os.Exit(130)
 		case "ignore":
 			time.Sleep(time.Hour)
+		case "finish":
+			outcome := "finished"
+			select {
+			case <-interrupted:
+				outcome = "interrupted"
+			case <-time.After(300 * time.Millisecond):
+			}
+			if err := os.WriteFile(path+".outcome", []byte(outcome), 0o644); err != nil {
+				panic(err)
+			}
 		}
 		code, _ := strconv.Atoi(os.Getenv("FAKE_SMOLVM_EXIT"))
 		os.Exit(code)
@@ -54,12 +65,14 @@ func TestMain(m *testing.M) {
 type fakeCall struct {
 	Args  []string
 	Stdin string
+	Pgid  int
 }
 
 type fake struct {
 	stdout, stderr string
 	exit           int
 	// onInterrupt makes the fake wait after replying: until SIGINT for "exit", or forever for "ignore".
+	// For "finish", it waits a moment unless SIGINT comes first, and records which happened in <call>.outcome.
 	onInterrupt string
 }
 
@@ -431,6 +444,64 @@ func TestSpawnErrorsCarrySmolvmsStderr(t *testing.T) {
 
 	if want := "smolvm machine exec --name m -d -- sleep: exit 1\nError: not running"; err == nil || err.Error() != want {
 		t.Errorf("error = %v; want %s", err, want)
+	}
+}
+
+func TestSmolvmRunsInItsOwnProcessGroup(t *testing.T) {
+	c, call := fake{stdout: "smolvm 1.22.0\n"}.start(t)
+
+	if err := c.CheckVersion(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := call().Pgid; got == syscall.Getpgrp() {
+		t.Errorf("smolvm shares devenv's process group %d, so a terminal's Ctrl-C reaches it", got)
+	}
+}
+
+func TestCancelledStartLetsSmolvmFinishTheStart(t *testing.T) {
+	c, _ := fake{onInterrupt: "finish"}.start(t)
+	path := os.Getenv("FAKE_SMOLVM_CALL")
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error)
+	go func() { done <- c.Start(ctx, "m", smolvm.StartOptions{}) }()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v; want context.Canceled", err)
+	}
+	if outcome, err := os.ReadFile(path + ".outcome"); string(outcome) != "finished" {
+		t.Errorf("smolvm machine start %s, %v; want it finished", outcome, err)
+	}
+}
+
+func TestErrorsQuoteEmptyArguments(t *testing.T) {
+	c, _ := fake{exit: 1}.start(t)
+
+	err := c.Start(t.Context(), "m", smolvm.StartOptions{})
+
+	if want := `smolvm machine start --name m --proxy "": exit 1`; err == nil || err.Error() != want {
+		t.Errorf("err = %v; want %s", err, want)
+	}
+}
+
+func TestStartWithAnEndedContextRunsNothing(t *testing.T) {
+	c, _ := fake{}.start(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if err := c.Start(ctx, "m", smolvm.StartOptions{}); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v; want context.Canceled", err)
+	}
+	if _, err := os.Stat(os.Getenv("FAKE_SMOLVM_CALL")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("smolvm ran: %v", err)
 	}
 }
 
