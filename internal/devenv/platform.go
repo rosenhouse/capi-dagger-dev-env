@@ -74,6 +74,9 @@ func (e *Environment) platform(ctx context.Context) error {
 	if err := e.stage("docker daemon", func() error { return e.vm.StartDocker(ctx) }); err != nil {
 		return err
 	}
+	if err := e.stage("images", func() error { return e.vm.PullImages(ctx) }); err != nil {
+		return err
+	}
 	if err := e.stage("registry", func() error { return e.startRegistry(ctx) }); err != nil {
 		return err
 	}

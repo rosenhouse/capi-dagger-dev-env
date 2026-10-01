@@ -86,8 +86,5 @@ func download(ctx context.Context, f File, path string) error {
 	if got := hex.EncodeToString(h.Sum(nil)); got != f.SHA256 {
 		return fmt.Errorf("download %s: sha256 %s, want %s", f.URL, got, f.SHA256)
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		return err
-	}
 	return os.Rename(tmp.Name(), path)
 }

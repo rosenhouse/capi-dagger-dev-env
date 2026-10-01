@@ -39,8 +39,8 @@ func TestDownloadsRejectOtherArchitectures(t *testing.T) {
 	}
 }
 
-func TestHostsTOMLTriesMirrorThenServer(t *testing.T) {
-	got := hostsTOML("http://172.31.255.254:5000", "172.31.255.254:5000")
+func TestHostsTOMLPullsFromTheRegistryOverPlainHTTP(t *testing.T) {
+	got := hostsTOML("172.31.255.254:5000")
 	want := `server = "http://172.31.255.254:5000"
 
 [host."http://172.31.255.254:5000"]

@@ -367,7 +367,7 @@ func (e *Environment) wait(ctx context.Context, g ready.Gate) error {
 
 // exportLogs writes cluster logs and resources to the environment directory, as far as bring-up got.
 func (e *Environment) exportLogs(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
 	if machines, err := e.opts.SmolVM.List(ctx); err != nil || e.VMState(machines) == "" {
 		return
@@ -380,7 +380,7 @@ func (e *Environment) exportLogs(ctx context.Context) {
 		}
 		e.progress("management API, from inside the VM: " + readyz)
 	}
-	if err := e.vm.ExportLogs(ctx, filepath.Join(e.Dir, "logs")); err != nil {
+	if err := e.vm.ExportLogs(ctx, filepath.Join(e.Dir, "logs"), WorkloadCluster, WorkloadNamespace); err != nil {
 		e.progress("export logs: " + err.Error())
 	}
 }

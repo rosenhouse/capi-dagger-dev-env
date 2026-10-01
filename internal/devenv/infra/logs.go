@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 )
 
-// ExportLogs writes smolvm's console log of the VM to dir on the host. If the guest still answers,
-// it adds the logs of every Kind and CAPD cluster, the CAPI and package resources, and dockerd's log.
-func (v *VM) ExportLogs(ctx context.Context, dir string) error {
+// ExportLogs writes smolvm's console log of the VM to dir on the host. If the guest still answers, it adds
+// the guest's memory and kernel log, dockerd's log, the CAPI and package resources, events and pods of both
+// clusters, the workload Cluster's conditions, and the logs of every Kind and CAPD cluster.
+func (v *VM) ExportLogs(ctx context.Context, dir, cluster, namespace string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -21,18 +22,38 @@ func (v *VM) ExportLogs(ctx context.Context, dir string) error {
 	if err == nil {
 		err = copyFile(filepath.Join(data, "agent-console.log"), filepath.Join(dir, "agent-console.log"))
 	}
-	return errors.Join(err, v.exportGuestLogs(ctx, dir))
+	return errors.Join(err, v.exportGuestLogs(ctx, dir, cluster, namespace))
 }
 
-func (v *VM) exportGuestLogs(ctx context.Context, dir string) error {
-	if err := v.Run(ctx, `rm -rf /tmp/devenv-logs && mkdir /tmp/devenv-logs && cd /tmp/devenv-logs
-cp /var/log/dockerd.log . || true
-docker ps -a >docker-ps.txt 2>&1 || true
-for cluster in $(kind get clusters 2>/dev/null); do kind export logs "$cluster" --name "$cluster" >/dev/null 2>&1 || true; done
-for r in clusters machines kubeadmcontrolplanes machinedeployments devclusters devmachines packageinstalls apps; do
-  kubectl get "$r" -A -o yaml || true
-done >resources.yaml 2>&1
-tar -czf /tmp/devenv-logs.tgz .`); err != nil {
+// collectLogs writes logs to the current directory, cheapest first, and bounds each call to an API server.
+const collectLogs = `cp /var/log/dockerd.log . 2>/dev/null
+free -m >free.txt 2>&1
+dmesg >dmesg.txt 2>&1
+docker ps -a >docker-ps.txt 2>&1
+k() { kubectl --request-timeout=10s "$@"; }
+if k get --raw=/readyz >/dev/null 2>&1; then
+  k get pods -A -o wide >pods.txt 2>&1
+  k get events -A --sort-by=.lastTimestamp >events.txt 2>&1
+  for r in clusters machinedeployments machinesets machines kubeadmcontrolplanes kubeadmconfigs machinehealthchecks \
+      clusterresourcesets clusterresourcesetbindings devclusters devmachines packageinstalls apps; do
+    k get "$r" -A -o yaml
+  done >resources.yaml 2>&1
+  timeout 30 clusterctl describe cluster "$CLUSTER" -n "$NAMESPACE" --show-conditions=all >clusterctl-describe.txt 2>&1
+  if timeout 30 clusterctl get kubeconfig "$CLUSTER" -n "$NAMESPACE" >/tmp/workload.kubeconfig 2>/dev/null; then
+    k --kubeconfig /tmp/workload.kubeconfig get pods -A -o wide >workload-pods.txt 2>&1
+    k --kubeconfig /tmp/workload.kubeconfig get events -A --sort-by=.lastTimestamp >workload-events.txt 2>&1
+  fi
+fi
+for c in $(kind get clusters 2>/dev/null); do timeout 60 kind export logs "$c" --name "$c" >/dev/null 2>&1; done
+`
+
+func (v *VM) exportGuestLogs(ctx context.Context, dir, cluster, namespace string) error {
+	if err := v.WriteFile(ctx, "/tmp/devenv-collect-logs.sh", []byte(collectLogs)); err != nil {
+		return err
+	}
+	if err := v.Run(ctx, fmt.Sprintf(`rm -rf /tmp/devenv-logs && mkdir /tmp/devenv-logs && cd /tmp/devenv-logs
+CLUSTER=%s NAMESPACE=%s CLUSTERCTL_DISABLE_VERSIONCHECK=true timeout 150 sh /tmp/devenv-collect-logs.sh || true
+tar -czf /tmp/devenv-logs.tgz .`, cluster, namespace)); err != nil {
 		return err
 	}
 	archive := filepath.Join(dir, ".guest-logs.tgz")
