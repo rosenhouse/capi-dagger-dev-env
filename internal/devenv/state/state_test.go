@@ -66,6 +66,20 @@ func TestIDDistinguishesStateDirsThatShareAName(t *testing.T) {
 	}
 }
 
+func TestASymlinkedRootNamesTheSameEnvironment(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	viaLink, direct := newEnv(t, filepath.Join(link, ".devenv"), "alpha"), newEnv(t, filepath.Join(real, ".devenv"), "alpha")
+
+	if viaLink != direct {
+		t.Errorf("through a symlink %+v, directly %+v", viaLink, direct)
+	}
+}
+
 // smolvmName matches the machine names smolvm accepts: src/data/mod.rs validate_vm_name in smolvm 1.22.0.
 var smolvmName = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_]|-[A-Za-z0-9_])*$`)
 
@@ -205,7 +219,7 @@ func TestRunningMeansTheVMIsRunning(t *testing.T) {
 
 func TestPortsAreRecordedInTheEnvDir(t *testing.T) {
 	env := newEnv(t, t.TempDir(), "alpha")
-	if _, err := env.Ports(); err == nil || !strings.Contains(err.Error(), "no ports") {
+	if _, err := env.ReadPorts(); err == nil || !strings.Contains(err.Error(), "no ports") {
 		t.Errorf("before WritePorts: err = %v", err)
 	}
 	want := state.Ports{MgmtAPI: 1, WorkloadAPI: 2, Registry: 3}
@@ -214,8 +228,37 @@ func TestPortsAreRecordedInTheEnvDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, err := newEnv(t, filepath.Dir(env.Dir), "alpha").Ports(); err != nil || got != want {
-		t.Errorf("Ports() = %+v, %v; want %+v", got, err, want)
+	if got, err := newEnv(t, filepath.Dir(env.Dir), "alpha").ReadPorts(); err != nil || got != want {
+		t.Errorf("ReadPorts() = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+func TestStatusSaysWhetherARunningEnvironmentIsReady(t *testing.T) {
+	env := newEnv(t, t.TempDir(), "alpha")
+	if err := os.MkdirAll(env.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	running := []smolvm.Machine{{Name: env.VM(), State: smolvm.Running}}
+	stopped := []smolvm.Machine{{Name: env.VM(), State: smolvm.Stopped}}
+	if got := env.Status(nil); got != "none" {
+		t.Errorf("without a VM: %q", got)
+	}
+	if got := env.Status(running); got != "running (not ready)" {
+		t.Errorf("before MarkReady: %q", got)
+	}
+
+	if err := env.MarkReady(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !env.Ready() {
+		t.Error("not Ready after MarkReady")
+	}
+	if got := env.Status(running); got != "running" {
+		t.Errorf("after MarkReady: %q", got)
+	}
+	if got := env.Status(stopped); got != "stopped" {
+		t.Errorf("stopped: %q", got)
 	}
 }
 

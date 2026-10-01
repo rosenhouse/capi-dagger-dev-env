@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,12 +44,26 @@ func New(root, name string) (Env, error) {
 	if strings.Contains(name, "--") {
 		return Env{}, fmt.Errorf("invalid environment name %q: smolvm rejects consecutive hyphens", name)
 	}
-	root, err := filepath.Abs(root)
+	root, err := resolve(root)
 	if err != nil {
 		return Env{}, err
 	}
 	rootHash := sha256.Sum256([]byte(root))
 	return Env{Name: name, Dir: filepath.Join(root, name), ID: name + "-" + hex.EncodeToString(rootHash[:4])}, nil
+}
+
+// resolve makes path absolute and resolves symlinks in as much of it as exists.
+func resolve(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, fs.ErrNotExist) && filepath.Dir(path) != path {
+		parent, err := resolve(filepath.Dir(path))
+		return filepath.Join(parent, filepath.Base(path)), err
+	}
+	return resolved, err
 }
 
 // Lock fails if another process holds the environment. The lock lasts until unlock or process exit.
@@ -121,16 +137,18 @@ type Ports struct {
 	Registry    int `json:"registry"`
 }
 
-// FreePorts returns ports that are free on the host's loopback address now.
+// FreePorts returns ports that are free on the host's loopback addresses now.
 func FreePorts() (Ports, error) {
-	var ports [3]int
-	for i := range ports {
+	var ports []int
+	for len(ports) < 3 {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return Ports{}, err
 		}
 		defer l.Close()
-		ports[i] = l.Addr().(*net.TCPAddr).Port
+		if port := l.Addr().(*net.TCPAddr).Port; !takenOnIPv6Loopback(port) {
+			ports = append(ports, port)
+		}
 	}
 	return Ports{MgmtAPI: ports[0], WorkloadAPI: ports[1], Registry: ports[2]}, nil
 }
@@ -146,7 +164,39 @@ func (e Env) WritePorts(p Ports) error {
 	return os.WriteFile(filepath.Join(e.Dir, "ports.json"), data, 0o600)
 }
 
-func (e Env) Ports() (Ports, error) {
+// takenOnIPv6Loopback reports whether another process listens on [::1]:port, where clients that try ::1 first would reach it.
+func takenOnIPv6Loopback(port int) bool {
+	l, err := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		return errors.Is(err, syscall.EADDRINUSE)
+	}
+	l.Close()
+	return false
+}
+
+// MarkReady records that the environment passed its readiness gates.
+func (e Env) MarkReady() error {
+	return os.WriteFile(filepath.Join(e.Dir, "ready"), nil, 0o600)
+}
+
+func (e Env) Ready() bool {
+	_, err := os.Stat(filepath.Join(e.Dir, "ready"))
+	return err == nil
+}
+
+// Status describes the environment's VM among machines.
+func (e Env) Status(machines []smolvm.Machine) string {
+	switch state := e.VMState(machines); {
+	case state == "":
+		return "none"
+	case state == smolvm.Running && !e.Ready():
+		return "running (not ready)"
+	default:
+		return string(state)
+	}
+}
+
+func (e Env) ReadPorts() (Ports, error) {
 	data, err := os.ReadFile(filepath.Join(e.Dir, "ports.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return Ports{}, fmt.Errorf("environment %s has no ports recorded", e.Name)
