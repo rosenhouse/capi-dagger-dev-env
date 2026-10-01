@@ -143,20 +143,20 @@ def host_stats(win, pid, amd):
     a, b = win[0], win[-1]
     dt = b["t"] - a["t"]
     out = {"host_s": dt}
-    pa, pb = a["proc"].get(pid), b["proc"].get(pid)
-    if pa and pb:
+    vmm = [s for s in win if pid in s["proc"] and pid in s["kvm"]]
+    if len(vmm) >= 2 and vmm[-1]["t"] > vmm[0]["t"]:
+        pa, pb, ka, kb = vmm[0]["proc"][pid], vmm[-1]["proc"][pid], vmm[0]["kvm"][pid], vmm[-1]["kvm"][pid]
+        vdt = vmm[-1]["t"] - vmm[0]["t"]
         guest = (pb["guest"] - pa["guest"]) / 100
-        out.update(vmm_guest_cores=guest / dt, vmm_kernel_cores=(pb["stime"] - pa["stime"]) / 100 / dt,
-                   vmm_user_cores=((pb["utime"] - pa["utime"]) / 100 - guest) / dt,
-                   vmm_minflt_s=(pb["minflt"] - pa["minflt"]) / dt, vmm_rss_anon_mib=pb.get("RssAnon", 0) / 1024,
+        out.update(vmm_s=vdt, vmm_guest_cores=guest / vdt, vmm_kernel_cores=(pb["stime"] - pa["stime"]) / 100 / vdt,
+                   vmm_user_cores=((pb["utime"] - pa["utime"]) / 100 - guest) / vdt,
+                   vmm_minflt_s=(pb["minflt"] - pa["minflt"]) / vdt, vmm_rss_anon_mib=pb.get("RssAnon", 0) / 1024,
                    vmm_rss_file_mib=pb.get("RssFile", 0) / 1024, vmm_rss_shmem_mib=pb.get("RssShmem", 0) / 1024)
-    ka, kb = a["kvm"].get(pid), b["kvm"].get(pid)
-    if ka and kb:
         for k in ("exits", "pf_taken", "pf_fixed", "pf_fast", "pf_spurious", "pf_mmio_spte_created", "mmio_exits",
                   "io_exits", "halt_exits", "irq_exits", "remote_tlb_flush", "tlb_flush", "insn_emulation",
                   "hypercalls", "request_irq_exits", "signal_exits"):
             if kb.get(k) is not None and ka.get(k) is not None:
-                out[f"kvm_{k}_s"] = (kb[k] - ka[k]) / dt
+                out[f"kvm_{k}_s"] = (kb[k] - ka[k]) / vdt
         for k in ("pages_4k", "pages_2m", "pages_1g"):
             if kb.get(k) is not None:
                 out[f"kvm_{k}"] = kb[k]
@@ -249,10 +249,11 @@ def main():
     (OUT / "results.json").write_text(json.dumps(results, indent=1))
 
     print("### Phases\n")
-    print("VMM cores split CPU time of the machine's VMM into guest mode, host kernel (KVM exits, page faults)"
-          " and VMM user space. Exits and faults are KVM tracepoint counts for all VMs on the host.\n")
+    print("VMM cores split the CPU time of the machine's VMM into guest mode, host kernel and VMM user space."
+          " Exits, remote TLB flushes and MMU invalidations are KVM counts; invalidations are those that vCPU"
+          " threads cause, as copy-on-write faults do. madvise is host memory that VMM threads release.\n")
     print("| phase | machine | s | guest user, sys, idle % | VMM cores guest, kernel, user | VMM minflt/s |"
-          " KVM exits/s | top exits/s | KVM faults/s | SPTE levels requested/s | madvise MiB/s |"
+          " KVM exits/s | top exits/s | remote TLB flushes/s | MMU invalidations by vCPUs/s | madvise MiB/s |"
           " guest ctxt/s, TLB IPI/s | readyz ok mgmt, work % | busiest guest processes, CPU s |")
     print("|" + "---|" * 14)
     for r in results:
@@ -261,8 +262,7 @@ def main():
               f"| {fmt(r.get('vmm_guest_cores'), 2)}, {fmt(r.get('vmm_kernel_cores'), 2)}, {fmt(r.get('vmm_user_cores'), 2)} "
               f"| {fmt(r.get('vmm_minflt_s'))} | {fmt(r.get('kvm_exits_s'))} "
               f"| {', '.join(f'{k} {v:.0f}' for k, v in list(r.get('exits', {}).items())[:4])} "
-              f"| {', '.join(f'{k} {v:.0f}' for k, v in list(r.get('faults', {}).items())[:3])} "
-              f"| {', '.join(f'L{k} {v:.0f}' for k, v in r.get('spte_requested_level', {}).items())} "
+              f"| {fmt(r.get('kvm_remote_tlb_flush_s'))} | {fmt(vcpu_invalidations(r))} "
               f"| {', '.join(f'{k} {v:.0f}' for k, v in list(r.get('madvise_mib', {}).items())[:2])} "
               f"| {fmt(r.get('guest_ctxt_s'))}, {fmt(r.get('guest_TLB_s'))} "
               f"| {fmt(r.get('readyz_ok_mgmt_pct'))}, {fmt(r.get('readyz_ok_work_pct'))} "
@@ -272,16 +272,20 @@ def main():
             continue
         print(f"\n### {r['phase']} ({r['machine']}), {BUCKET} s buckets\n")
         print("| t s | guest idle, sys % | VMM cores guest, kernel | VMM minflt/s | KVM exits/s | NPF/EPT exits/s |"
-              " KVM faults/s | guest pgfault/s | readyz mgmt, work |")
-        print("|" + "---|" * 9)
+              " remote TLB flushes/s | readyz mgmt, work |")
+        print("|" + "---|" * 8)
         for s in r["series"]:
             ex = s.get("exits", {})
-            tdp = ex.get("NPF", ex.get("EPT_VIOLATION"))
             print(f"| {s['t']} | {fmt(s.get('guest_idle_pct'))}, {fmt(s.get('guest_sys_pct'))} "
                   f"| {fmt(s.get('vmm_guest_cores'), 2)}, {fmt(s.get('vmm_kernel_cores'), 2)} "
-                  f"| {fmt(s.get('vmm_minflt_s'))} | {fmt(s.get('kvm_exits_s'))} | {fmt(tdp)} "
-                  f"| {fmt(sum(s.get('faults', {}).values()) if s.get('faults') else None)} "
-                  f"| {fmt(s.get('guest_pgfault_s'))} | {' '.join(s.get('readyz') or [])} |")
+                  f"| {fmt(s.get('vmm_minflt_s'))} | {fmt(s.get('kvm_exits_s'))} "
+                  f"| {fmt(ex.get('NPF', ex.get('EPT_VIOLATION')))} | {fmt(s.get('kvm_remote_tlb_flush_s'))} "
+                  f"| {' '.join(s.get('readyz') or [])} |")
+
+
+def vcpu_invalidations(r):
+    rates = [v for k, v in r.get("unmap_hva_range", {}).items() if k.startswith("fc_vcpu")]
+    return sum(rates) if rates else None
 
 
 if __name__ == "__main__":
