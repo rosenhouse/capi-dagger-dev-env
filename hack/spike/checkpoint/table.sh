@@ -14,7 +14,7 @@ awk -F'\t' '{ k = $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5; n[k]++; if ($6 == "ok") ok
   while IFS=$'\t' read -r cm cc rm rc p r; do summary "| $cm | $cc | $rm | $rc | $p | $r |"; done
 
 summary ""
-summary "### Rows where host_contract predicted wrongly"
+summary "### Rows whose outcome differs from the contract's prediction"
 awk -F'\t' '($5 == "hit") != ($6 == "ok")' <<<"$rows" | short | sed 's/\t/ | /g; s/^/| /; s/$/ |/' |
   while read -r line; do summary "$line"; done
 
