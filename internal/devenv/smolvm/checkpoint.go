@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 )
 
@@ -39,11 +38,10 @@ func linuxAMD64Contract(cpuinfo string) string {
 		}
 		key, value, _ := strings.Cut(line, ":")
 		key, value = strings.TrimSpace(key), strings.Join(strings.Fields(value), " ")
-		if key == "vendor_id" && value == "GenuineIntel" {
+		switch {
+		case key == "vendor_id" && value == "GenuineIntel":
 			return "linux-kvm-intel-portable-v1"
-		}
-		if slices.Contains([]string{"vendor_id", "cpu family", "model", "stepping", "flags", "Features",
-			"CPU implementer", "CPU architecture", "CPU variant", "CPU part", "CPU revision"}, key) {
+		case key == "vendor_id", key == "cpu family", key == "model", key == "stepping", key == "flags":
 			identity += key + "=" + value + "\n"
 		}
 	}
@@ -77,6 +75,7 @@ func CheckpointContract(file string) (string, error) {
 }
 
 // readManifest reads a checkpoint's manifest, which sits just before a 64-byte footer that gives its size.
+// It does not verify the file; smolvm does when it restores the checkpoint.
 // crates/smolvm-checkpoint/FORMAT.md §3 in smolvm's source describes the layout.
 func readManifest(file string) ([]byte, error) {
 	f, err := os.Open(file)

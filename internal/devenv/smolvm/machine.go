@@ -3,6 +3,7 @@ package smolvm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -41,7 +42,8 @@ func (c CLI) CreateFromCheckpoint(ctx context.Context, name, file string) error 
 	return c.do(ctx, "machine", "create", "--name", name, "--from", file)
 }
 
-// RebindPorts replaces published ports of a machine that is not running.
+// RebindPorts removes and adds published ports of a machine that is not running.
+// smolvm ignores a removal that matches no published port.
 func (c CLI) RebindPorts(ctx context.Context, name string, remove, add []Port) error {
 	args := withPorts([]string{"machine", "update", "--name", name}, "--remove-port", remove)
 	return c.do(ctx, withPorts(args, "-p", add)...)
@@ -139,18 +141,21 @@ type ExecOptions struct {
 	Stdout, Stderr io.Writer
 	// Timeout makes smolvm kill the command and exit 124.
 	Timeout time.Duration
-	// Detach leaves the command running in the background. smolvm prints its guest PID.
+	// Detach leaves the command running in the background, without Stdin or Timeout. smolvm prints its guest PID.
 	Detach bool
 }
 
 // Exec runs argv in a running machine. A nonzero exit returns an *ExitError.
 func (c CLI) Exec(ctx context.Context, name string, argv []string, opts ExecOptions) error {
+	if opts.Detach && (opts.Stdin != nil || opts.Timeout != 0) {
+		return errors.New("smolvm: a detached Exec takes no Stdin or Timeout")
+	}
 	args := []string{"machine", "exec", "--name", name}
 	for _, env := range opts.Env {
 		args = append(args, "-e", env)
 	}
 	if opts.Timeout > 0 {
-		args = append(args, "--timeout", fmt.Sprintf("%dms", opts.Timeout.Milliseconds()))
+		args = append(args, "--timeout", fmt.Sprintf("%dms", (opts.Timeout+time.Millisecond-1)/time.Millisecond))
 	}
 	switch {
 	case opts.Detach:
