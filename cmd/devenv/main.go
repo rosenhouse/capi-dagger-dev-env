@@ -30,7 +30,8 @@ func main() {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Environment %s is up.\n  export KUBECONFIG=%s\nPress Ctrl-C to tear it down.\n", env.Name, env.MgmtKubeconfig)
+			fmt.Printf("Environment %s is up.\n  management: export KUBECONFIG=%s\n  workload:   export KUBECONFIG=%s\nPress Ctrl-C to tear it down.\n",
+				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig)
 			<-cmd.Context().Done()
 			return env.Close()
 		},
