@@ -1,0 +1,25 @@
+name: smolvm
+description: Opens /dev/kvm to the runner user and installs smolvm $SMOLVM_VERSION and Go.
+runs:
+  using: composite
+  steps:
+    - name: Enable KVM
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        sudo udevadm settle
+        test -w /dev/kvm
+        grep -m1 'model name' /proc/cpuinfo
+    # smolvm expands disk templates beside its binary, so it needs a writable directory.
+    - name: Install smolvm
+      shell: bash
+      run: |
+        curl -fsSLo "$RUNNER_TEMP/smolvm.tar.gz" "https://github.com/smol-machines/smolvm/releases/download/v$SMOLVM_VERSION/smolvm-$SMOLVM_VERSION-linux-x86_64.tar.gz"
+        echo "$SMOLVM_LINUX_X86_64_SHA256  $RUNNER_TEMP/smolvm.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/smolvm.tar.gz" -C "$HOME"
+        echo "$HOME/smolvm-$SMOLVM_VERSION-linux-x86_64" >>"$GITHUB_PATH"
+    - uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod

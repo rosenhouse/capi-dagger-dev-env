@@ -12,6 +12,10 @@ concurrency:
 env:
   SMOLVM_VERSION: 1.22.0
   SMOLVM_LINUX_X86_64_SHA256: 00d2f057c963ff950846d4059af87bdddb7edf707750cdab863cb0879d6b339e
+  SMOLVM_IDLE_RECLAIM: "off"
+defaults:
+  run:
+    shell: bash
 jobs:
   unit:
     runs-on: ubuntu-24.04
@@ -24,30 +28,14 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go generate ./...
+      - run: go mod tidy
       - run: test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
   smolvm:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          sudo udevadm settle
-          test -w /dev/kvm
-          grep -m1 'model name' /proc/cpuinfo
-      # smolvm expands disk templates beside its binary, so it needs a writable directory.
-      - name: Install smolvm
-        run: |
-          curl -fsSLo "$RUNNER_TEMP/smolvm.tar.gz" "https://github.com/smol-machines/smolvm/releases/download/v$SMOLVM_VERSION/smolvm-$SMOLVM_VERSION-linux-x86_64.tar.gz"
-          echo "$SMOLVM_LINUX_X86_64_SHA256  $RUNNER_TEMP/smolvm.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/smolvm.tar.gz" -C "$HOME"
-          echo "$HOME/smolvm-$SMOLVM_VERSION-linux-x86_64" >>"$GITHUB_PATH"
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/smolvm
       - run: go test -v ./internal/devenv/smolvm/
         env:
           DEVENV_SMOLVM_TESTS: "1"
@@ -64,3 +52,68 @@ jobs:
         with:
           name: smolvm-logs
           path: ${{ runner.temp }}/smolvm-logs
+  devenv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/smolvm
+      - run: go build -o /dev/null ./cmd/devenv
+      - run: |
+          go run ./cmd/devenv test --name ci 2>&1 | tee "$RUNNER_TEMP/first.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/first.seconds"
+      # A second run with the same name checks cleanup and name reuse.
+      - run: |
+          go run ./cmd/devenv test --name ci 2>&1 | tee "$RUNNER_TEMP/second.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/second.seconds"
+      - run: go run ./cmd/devenv down --name ci --purge && test ! -e .devenv/ci
+      - name: Stage timings
+        if: always()
+        run: |
+          for run in first second; do
+            [ -f "$RUNNER_TEMP/$run.log" ] || continue
+            echo "### Stage timings, $run run"
+            echo "| Stage | Seconds |"
+            echo "| --- | ---: |"
+            sed -nE 's/^\[ *[0-9.]+s\] (.+): ([0-9.]+)s$/| \1 | \2 |/p' "$RUNNER_TEMP/$run.log"
+            sed -nE 's/^\[ *([0-9.]+)s\] workload packages: .*/| **up** | **\1** |/p' "$RUNNER_TEMP/$run.log"
+            [ -f "$RUNNER_TEMP/$run.seconds" ] && echo "| **devenv test** | **$(cat "$RUNNER_TEMP/$run.seconds")** |"
+          done >>"$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devenv
+          path: .devenv/
+          include-hidden-files: true
+  concurrent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/smolvm
+      - run: go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
+      - name: Two environments at once, one with a random name
+        timeout-minutes: 30
+        run: |
+          echo "### Two environments at once" >>"$GITHUB_STEP_SUMMARY"
+          echo "Before: $(free -m | awk '/^Mem:/ { print $3 }') MiB of memory and $(df --output=used -BG / | tail -1 | tr -d ' ') of disk used." >>"$GITHUB_STEP_SUMMARY"
+          (while sleep 5; do echo "$(free -m | awk '/^Mem:/ { print $3 }') $(df --output=used -BG / | tail -1 | tr -d ' G')"; done >"$RUNNER_TEMP/usage.log") &
+          "$RUNNER_TEMP/devenv" test --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
+          "$RUNNER_TEMP/devenv" test 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
+          status=0
+          wait $a || status=1
+          wait $r || status=1
+          echo "Peak: $(sort -n "$RUNNER_TEMP/usage.log" | tail -1 | cut -d' ' -f1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used," \
+            "$(cut -d' ' -f2 "$RUNNER_TEMP/usage.log" | sort -n | tail -1) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk." >>"$GITHUB_STEP_SUMMARY"
+          for env in a random; do
+            echo "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s." >>"$GITHUB_STEP_SUMMARY"
+          done
+          echo "Both tests took $SECONDS s." >>"$GITHUB_STEP_SUMMARY"
+          exit $status
+      - run: test "$(ls .devenv)" = a
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devenv-concurrent
+          path: .devenv/
+          include-hidden-files: true
