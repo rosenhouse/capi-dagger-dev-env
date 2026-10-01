@@ -273,6 +273,32 @@ func TestExportLogsSkipsAnInterruptedRun(t *testing.T) {
 	}
 }
 
+func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
+	fakeHost(t)
+	f := fakeSmolvm(t, vm(""))
+	e, err := open(f.env, f.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	unlock, err := state.WaitLock(t.Context(), e.startLock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	err = e.createVM(ctx, "")
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.calls(t); len(got) > 0 {
+		t.Errorf("smolvm calls = %q", got)
+	}
+}
+
 func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Stopped))
 	env := f.env
