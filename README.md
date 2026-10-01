@@ -29,7 +29,12 @@ Without `--name`, `up` acts on the only environment, or else creates one with a 
 `kubeconfig`, `redeploy` and `down` act on the only environment, or else the only running one.
 
 Every `up` builds a new VM. Downloads, the distroless base image and Go's build cache persist in the user cache directory.
-Images do not: a cold start pulls the platform's images from their registries, which needs about 5 Mbit/s.
+Images do not: a cold start pulls the platform's images from their registries. A pull-through mirror (R8) comes later.
+
+The API servers and the environment's registry listen on free ports of the host's loopback addresses, which `status` shows.
+A failure names the stage and the readiness gate that failed, and exports logs to `.devenv/<name>/logs`.
+`--retain` keeps the VM of a failed `up` or `test` for debugging.
+`.devenv/<name>/guest.log` holds the output of commands in the VM and each check of a readiness gate. `--verbose` also streams it.
 
 ## Warm starts
 
@@ -40,14 +45,9 @@ The platform is the VM with dockerd, the registry, both clusters, kapp-controlle
 ```sh
 go run ./cmd/devenv platform save   # brings up the platform in a new VM and saves it
 go run ./cmd/devenv platform key    # prints the key of this host's checkpoint
-rm -r ~/.cache/devenv/platform      # clears the checkpoints
+rm -r ~/.cache/devenv/platform      # clears the checkpoints, on Linux
 ```
 
 A checkpoint takes about 3 GB in `platform/` under the user cache directory, named by its key.
 The key hashes smolvm's version, every pinned download and image, the guest's scripts, the VM's size and the host's CPU type,
 so a change to any of them needs a new `platform save`. A checkpoint restores only on a CPU of the same type.
-
-The API servers and the environment's registry listen on free ports of the host's loopback addresses, which `status` shows.
-A failure names the stage and the readiness gate that failed, and exports logs to `.devenv/<name>/logs`.
-`--retain` keeps the VM of a failed `up` or `test` for debugging.
-`.devenv/<name>/guest.log` holds the output of commands in the VM and each check of a readiness gate. `--verbose` also streams it.

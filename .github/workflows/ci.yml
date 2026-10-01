@@ -56,8 +56,7 @@ jobs:
           path: ${{ runner.temp }}/smolvm-logs
   # Only post-merge CI publishes checkpoints. Runners land on random CPUs, so three jobs warm several contracts.
   platform:
-    # TEMPORARY: also on pull requests, which do not publish, to try this job before it runs on smol.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/smol') || github.event_name == 'pull_request'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/smol'
     strategy:
       fail-fast: false
       matrix:
@@ -77,7 +76,7 @@ jobs:
           save-on-miss: true
       - if: steps.cache.outputs.hit != 'true'
         run: echo "$EPOCHREALTIME" >"$RUNNER_TEMP/cache-save.start"
-      - if: steps.cache.outputs.hit != 'true' && github.event_name == 'push'
+      - if: steps.cache.outputs.hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/devenv/platform
