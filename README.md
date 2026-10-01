@@ -24,7 +24,7 @@ go run ./cmd/devenv down --purge # stops an environment and deletes its cached D
 ```
 
 Each environment keeps its kubeconfigs and logs in `.devenv/<name>/`.
-Without `--name`, `kubeconfig` and `down` act on the only environment, or else the only running one.
+Without `--name`, `kubeconfig`, `redeploy` and `down` act on the only environment, or else the only running one.
 Reusing a name with `--name` reuses that environment's cached images.
 API server tunnels listen on all host interfaces.
 A failure names the stage and the readiness gate that failed.

@@ -35,6 +35,15 @@ func Config(c *dagger.Client, root string) *dagger.Directory {
 	return c.Host().Directory(root+"/config", dagger.HostDirectoryOpts{NoCache: true})
 }
 
+// Snapshot pins the current content of Source and Config, so a save during a build does not change them.
+func Snapshot(ctx context.Context, c *dagger.Client, root string) (src, config *dagger.Directory, err error) {
+	if src, err = Source(c, root).Sync(ctx); err != nil {
+		return nil, nil, err
+	}
+	config, err = Config(c, root).Sync(ctx)
+	return src, config, err
+}
+
 // Version names a build of src by its content.
 func Version(ctx context.Context, src *dagger.Directory) (string, error) {
 	digest, err := src.Digest(ctx)

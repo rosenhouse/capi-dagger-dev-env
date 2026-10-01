@@ -5,13 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -58,7 +58,7 @@ func main() {
 				testErr = e2e.GreetingReachesWorkloadCluster(env.Context(), env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
 			}
 			if testErr == nil {
-				testErr = control.Request(env.Context(), env.SocketPath(), "redeploy redeploy-test", os.Stderr)
+				testErr = control.Request(env.Context(), env.SocketPath(), "redeploy redeploy-test", io.Discard)
 			}
 			if testErr == nil {
 				testErr = e2e.HelloServesVersion(env.Context(), env.WorkloadKubeconfig, "redeploy-test")
@@ -126,12 +126,12 @@ func main() {
 		Short: "Rebuild from the current source and redeploy into a running environment",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if strings.ContainsFunc(version, unicode.IsSpace) {
-				return fmt.Errorf("version %q contains whitespace", version)
-			}
 			env, err := state.Existing(o.StateDir, o.Name)
 			if err != nil {
 				return err
+			}
+			if running, err := env.Running(); err != nil || !running {
+				return errors.Join(fmt.Errorf("environment %s is not running", env.Name), err)
 			}
 			if err := control.Request(cmd.Context(), env.SocketPath(), strings.TrimSpace("redeploy "+version), os.Stderr); err != nil {
 				return err

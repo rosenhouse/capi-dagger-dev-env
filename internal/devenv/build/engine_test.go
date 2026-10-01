@@ -12,26 +12,14 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/build"
 )
 
-// TestSessionSeesHostEdits needs a Dagger engine, so it runs only with DEVENV_ENGINE_TESTS set.
-func TestSessionSeesHostEdits(t *testing.T) {
-	if os.Getenv("DEVENV_ENGINE_TESTS") == "" {
-		t.Skip("set DEVENV_ENGINE_TESTS to run against a Dagger engine")
-	}
-	ctx := context.Background()
-	c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	root := t.TempDir()
-	write(t, root, "go.mod", "module example\n")
-	write(t, root, "cmd/hello/main.go", "package main\n")
-	write(t, root, "config/hello/a.yaml", "a: 1\n")
-	srcBefore, configBefore := versions(t, ctx, c, root)
+// The tests in this file need a Dagger engine, so they run only with DEVENV_ENGINE_TESTS set.
 
-	write(t, root, "cmd/hello/main.go", "package main\n\nfunc main() {}\n")
-	write(t, root, "config/hello/a.yaml", "a: 2\n")
-	srcAfter, configAfter := versions(t, ctx, c, root)
+func TestSessionSeesHostEdits(t *testing.T) {
+	ctx, c, root := engineAndModule(t)
+	srcBefore, configBefore := versions(t, ctx, build.Source(c, root), build.Config(c, root))
+
+	edit(t, root)
+	srcAfter, configAfter := versions(t, ctx, build.Source(c, root), build.Config(c, root))
 
 	if srcAfter == srcBefore {
 		t.Errorf("Version(Source) stayed %s after an edit", srcBefore)
@@ -41,17 +29,56 @@ func TestSessionSeesHostEdits(t *testing.T) {
 	}
 }
 
-func versions(t *testing.T, ctx context.Context, c *dagger.Client, root string) (src, config string) {
+func TestSnapshotIgnoresLaterHostEdits(t *testing.T) {
+	ctx, c, root := engineAndModule(t)
+	src, config, err := build.Snapshot(ctx, c, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcBefore, configBefore := versions(t, ctx, src, config)
+
+	edit(t, root)
+	srcAfter, configAfter := versions(t, ctx, src, config)
+
+	if srcAfter != srcBefore || configAfter != configBefore {
+		t.Errorf("snapshot versions changed from %s, %s to %s, %s after an edit", srcBefore, configBefore, srcAfter, configAfter)
+	}
+}
+
+func engineAndModule(t *testing.T) (context.Context, *dagger.Client, string) {
 	t.Helper()
-	src, err := build.Version(ctx, build.Source(c, root))
+	if os.Getenv("DEVENV_ENGINE_TESTS") == "" {
+		t.Skip("set DEVENV_ENGINE_TESTS to run against a Dagger engine")
+	}
+	ctx := context.Background()
+	c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
 	if err != nil {
 		t.Fatal(err)
 	}
-	config, err = build.Version(ctx, build.Config(c, root))
+	t.Cleanup(func() { c.Close() })
+	root := t.TempDir()
+	write(t, root, "go.mod", "module example\n")
+	write(t, root, "cmd/hello/main.go", "package main\n")
+	write(t, root, "config/hello/a.yaml", "a: 1\n")
+	return ctx, c, root
+}
+
+func edit(t *testing.T, root string) {
+	write(t, root, "cmd/hello/main.go", "package main\n\nfunc main() {}\n")
+	write(t, root, "config/hello/a.yaml", "a: 2\n")
+}
+
+func versions(t *testing.T, ctx context.Context, src, config *dagger.Directory) (string, string) {
+	t.Helper()
+	srcVersion, err := build.Version(ctx, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return src, config
+	configVersion, err := build.Version(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srcVersion, configVersion
 }
 
 func write(t *testing.T, root, path, content string) {
