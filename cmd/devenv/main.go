@@ -79,11 +79,10 @@ func main() {
 			fmt.Fprintln(w, "NAME\tSTATE\tKUBECONFIGS")
 			for _, env := range envs {
 				running, err := env.Running()
-				if err != nil {
-					return err
-				}
 				status, kubeconfigs := "stopped", []string(nil)
-				if running {
+				if err != nil {
+					status = "unknown: " + err.Error()
+				} else if running {
 					status = "running"
 					kubeconfigs, _ = filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
 				}
@@ -132,7 +131,8 @@ func main() {
 	root.AddCommand(downCmd)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// After the first signal, a second one kills devenv.
+	context.AfterFunc(ctx, stop)
 	if err := root.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}

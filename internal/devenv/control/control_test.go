@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,41 @@ func TestRequestStopsWithItsContextAndCancelsTheHandler(t *testing.T) {
 	case <-handlerDone:
 	case <-time.After(5 * time.Second):
 		t.Error("handler still running after the client left")
+	}
+}
+
+func TestServeStopsDespiteASilentClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	path, served := serveContext(t, ctx, nil)
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Error(err)
+		}
+	case <-time.After(time.Second):
+		t.Error("Serve still waiting for a client that sent nothing")
+	}
+}
+
+func TestServeCreatesTheSocketDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "c.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listening, served := make(chan struct{}), make(chan error, 1)
+	go func() { served <- control.Serve(ctx, path, nil, func() { close(listening) }) }()
+	select {
+	case <-listening:
+	case err := <-served:
+		t.Fatal(err)
 	}
 }
 

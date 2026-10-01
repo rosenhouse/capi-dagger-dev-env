@@ -3,8 +3,10 @@ package devenv
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +82,64 @@ func TestPurgeRefusesARunningEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if err := Purge(context.Background(), env); err == nil || !strings.Contains(err.Error(), "alpha is running") {
+	if err := Purge(context.Background(), env); err == nil || !strings.Contains(err.Error(), "alpha is already running") {
 		t.Errorf("err = %v", err)
 	}
+}
+
+func TestStartForgetsThePreviousRunsKubeconfigs(t *testing.T) {
+	root := t.TempDir()
+	env, _ := state.New(root, "alpha")
+	stale := filepath.Join(env.Dir, "workload.kubeconfig")
+	if err := os.MkdirAll(env.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := start(context.Background(), Options{StateDir: root, Name: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale kubeconfig: %v", err)
+	}
+}
+
+func TestCloseStopsTheControlSocket(t *testing.T) {
+	e, err := start(context.Background(), Options{StateDir: t.TempDir(), Name: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(e.SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("socket after Close: %v", err)
+	}
+}
+
+// TestMain keeps the control sockets of test environments, and of their helper processes, out of the real cache directory.
+func TestMain(m *testing.M) {
+	home := os.Getenv("DEVENV_TEST_HOME")
+	owner := home == ""
+	if owner {
+		var err error
+		if home, err = os.MkdirTemp("", "devenv-test-home"); err != nil {
+			panic(err)
+		}
+		os.Setenv("DEVENV_TEST_HOME", home)
+	}
+	os.Setenv("HOME", home)
+	os.Setenv("XDG_CACHE_HOME", "")
+	code := m.Run()
+	if owner {
+		os.RemoveAll(home)
+	}
+	os.Exit(code)
 }
