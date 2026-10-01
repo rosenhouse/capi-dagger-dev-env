@@ -3,7 +3,6 @@ package infra
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -15,10 +14,11 @@ func (v *VM) Restore(ctx context.Context, checkpoint string) error {
 
 // A capture skips zero pages, so zero-filling free guest memory keeps stale page cache out of the checkpoint.
 // Each step can take as much host memory as it fills, so the steps stop short of both reserves.
+// A VM restored from a guest filled to within 512 MiB of its memory stopped right after its start.
 const (
 	zeroFillStepMiB = 512
 	hostReserveMiB  = 2048
-	guestReserveMiB = 512
+	guestReserveMiB = 2048
 )
 
 func zeroFillSteps(hostMiB, guestMiB int) int {
@@ -39,20 +39,13 @@ awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo`)
 		return 0, fmt.Errorf("guest MemAvailable %q: %w", out, err)
 	}
 	steps := zeroFillSteps(hostMiB, guestMiB)
-	// TEMPORARY probe knob.
-	if r, _ := strconv.Atoi(os.Getenv("DEVENV_PROBE_GUEST_RESERVE")); r > 0 {
-		steps = max(0, min((hostMiB-hostReserveMiB)/zeroFillStepMiB, (guestMiB-r)/zeroFillStepMiB))
-	}
 	// The capture syncs again, and gives up if that takes over 30 s.
-	return steps * zeroFillStepMiB, v.Run(ctx, fmt.Sprintf(`free -m
-mkdir -p /mnt/zero
+	return steps * zeroFillStepMiB, v.Run(ctx, fmt.Sprintf(`mkdir -p /mnt/zero
 mount -t tmpfs -o size=100%% zero /mnt/zero
 i=0
 while [ $i -lt %d ]; do dd if=/dev/zero of=/mnt/zero/$i bs=1M count=%d 2>/dev/null; i=$((i + 1)); done
-free -m
 rm -f /mnt/zero/*
 umount /mnt/zero
-dmesg | tail -40
 fstrim /storage
 fstrim / 2>/dev/null || true
 sync`, steps, zeroFillStepMiB))

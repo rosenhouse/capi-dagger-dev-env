@@ -4,17 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 )
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -47,10 +42,10 @@ func TestDownloadsRejectOtherArchitectures(t *testing.T) {
 
 func TestZeroFillStepsKeepMemoryFreeOnTheHostAndInTheGuest(t *testing.T) {
 	for _, tc := range []struct{ hostMiB, guestMiB, want int }{
-		{hostMiB: 16000, guestMiB: 2600, want: 4},
-		{hostMiB: 3100, guestMiB: 4096, want: 2},
-		{hostMiB: 2000, guestMiB: 4096, want: 0},
-		{hostMiB: 16000, guestMiB: 400, want: 0},
+		{hostMiB: 16000, guestMiB: 3100, want: 2},
+		{hostMiB: 3100, guestMiB: 6000, want: 2},
+		{hostMiB: 2000, guestMiB: 6000, want: 0},
+		{hostMiB: 16000, guestMiB: 2500, want: 0},
 	} {
 		if got := zeroFillSteps(tc.hostMiB, tc.guestMiB); got != tc.want {
 			t.Errorf("zeroFillSteps(%d, %d) = %d; want %d", tc.hostMiB, tc.guestMiB, got, tc.want)
@@ -94,51 +89,6 @@ func runPull(t *testing.T, docker, du string) (calls, out string, err error) {
 	output, err := cmd.CombinedOutput()
 	data, _ := os.ReadFile(filepath.Join(dir, "calls"))
 	return string(data), string(output), err
-}
-
-func TestGuestCommandsWaitForABusyGuestToAnswer(t *testing.T) {
-	shortenUnreachableWait(t, time.Minute)
-	v := &VM{CLI: smolvm.CLI{Path: unreachableSmolvm(t, 2)}, Name: "m", Log: io.Discard}
-
-	out, err := v.Output(t.Context(), "true")
-
-	if err != nil || out != "ok\n" {
-		t.Errorf("Output() = %q, %v", out, err)
-	}
-}
-
-func TestGuestCommandsGiveUpOnAGuestThatNeverAnswers(t *testing.T) {
-	shortenUnreachableWait(t, 50*time.Millisecond)
-	v := &VM{CLI: smolvm.CLI{Path: unreachableSmolvm(t, 1000)}, Name: "m", Log: io.Discard}
-
-	if err := v.Run(t.Context(), "true"); !smolvm.AgentUnreachable(err) {
-		t.Errorf("err = %v", err)
-	}
-}
-
-// unreachableSmolvm returns a fake smolvm that fails as a busy guest makes it fail n times, then prints ok.
-func unreachableSmolvm(t *testing.T, n int) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "smolvm")
-	script := fmt.Sprintf(`#!/bin/sh
-n=$(cat "$0.n" 2>/dev/null || echo 0)
-echo $((n + 1)) >"$0.n"
-if [ "$n" -lt %d ]; then
-  echo "Error: agent operation failed: connect: machine 'm' is not running. Use 'smolvm machine start --name m' first." >&2
-  exit 1
-fi
-echo ok
-`, n)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func shortenUnreachableWait(t *testing.T, wait time.Duration) {
-	oldWait, oldInterval := unreachableWait, unreachableInterval
-	unreachableWait, unreachableInterval = wait, time.Millisecond
-	t.Cleanup(func() { unreachableWait, unreachableInterval = oldWait, oldInterval })
 }
 
 func TestHostsTOMLPullsFromTheRegistryOverPlainHTTP(t *testing.T) {

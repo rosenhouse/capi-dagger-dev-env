@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
@@ -176,23 +175,8 @@ func SavePlatform(ctx context.Context, o Options, replace bool) (string, error) 
 
 // capture checkpoints the VM to file, and deletes the VM, which runs slowly after a capture.
 func (e *Environment) capture(ctx context.Context, file string) error {
-	// TEMPORARY probe knobs.
-	if s, _ := strconv.Atoi(os.Getenv("DEVENV_PROBE_SETTLE")); s > 0 {
-		e.progress(fmt.Sprintf("probe: settling %d s", s))
-		time.Sleep(time.Duration(s) * time.Second)
-	}
-	host := hostAvailableMiB()
-	switch os.Getenv("DEVENV_PROBE_PREPARE") {
-	case "nofill":
-		host = 0
-	case "none":
-		host = -1
-	}
 	if err := e.stage("prepare capture", func() error {
-		if host < 0 {
-			return nil
-		}
-		filled, err := e.vm.PrepareCapture(ctx, host)
+		filled, err := e.vm.PrepareCapture(ctx, hostAvailableMiB())
 		e.progress(fmt.Sprintf("zero-filled %d MiB of guest memory", filled))
 		return err
 	}); err != nil {

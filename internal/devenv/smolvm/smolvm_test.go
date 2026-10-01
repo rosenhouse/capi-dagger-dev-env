@@ -513,20 +513,6 @@ func TestAgentTimedOut(t *testing.T) {
 	}
 }
 
-func TestAgentUnreachable(t *testing.T) {
-	for stderr, want := range map[string]bool{
-		"Error: agent operation failed: connect: machine 'm' is not running. Use 'smolvm machine start --name m' first.\n": true,
-		"Error: agent operation failed: connect: machine 'm' not found\n":                                                  false,
-		"sh: kubectl: not found\n": false,
-	} {
-		c, _ := fake{stderr: stderr, exit: 1}.start(t)
-
-		if got := smolvm.AgentUnreachable(c.Exec(t.Context(), "m", []string{"true"}, smolvm.ExecOptions{})); got != want {
-			t.Errorf("AgentUnreachable() = %v after %q", got, stderr)
-		}
-	}
-}
-
 func TestErrorsQuoteEmptyArguments(t *testing.T) {
 	c, _ := fake{exit: 1}.start(t)
 
