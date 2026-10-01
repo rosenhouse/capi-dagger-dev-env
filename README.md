@@ -57,5 +57,7 @@ func main() {
 
 Run it from your module, which devenv builds from.
 devenv stamps each build's version into a command's `var version string` in package `main`.
+Each package's config refers to an image by its name, such as `image: manager`.
 See [`devenv.Config`](devenv/config.go) for the hooks.
-[`devenv/minimal_test.go`](devenv/minimal_test.go) configures the smallest consumer, and [`examples/greeting/cmd/devenv`](examples/greeting/cmd/devenv/main.go) a larger one.
+[`devenv/cli/testdata/minimal`](devenv/cli/testdata/minimal) is the smallest consumer, configured in [`minimal_test.go`](devenv/cli/minimal_test.go).
+[`examples/greeting`](examples/greeting) is a larger one.
