@@ -23,7 +23,7 @@ func main() {
 	root.PersistentFlags().StringVar(&o.Name, "name", "", "environment name; up and test pick a random one if empty")
 	root.PersistentFlags().StringVar(&o.StateDir, "state-dir", "", "directory for kubeconfigs and logs (default: .devenv in devenv's source)")
 	root.PersistentFlags().BoolVarP(&o.Verbose, "verbose", "v", false, "stream guest command output to stderr")
-	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+	locate := func(*cobra.Command, []string) error {
 		wd, err := os.Getwd()
 		if err != nil {
 			return err
@@ -133,6 +133,10 @@ func main() {
 	}
 	downCmd.Flags().BoolVar(&purge, "purge", false, "also delete the environment's state dir")
 	root.AddCommand(downCmd)
+
+	for _, cmd := range root.Commands() {
+		cmd.PreRunE = locate
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	// After the first signal, a second one kills devenv.

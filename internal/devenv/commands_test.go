@@ -44,7 +44,7 @@ func TestStatusListsEnvironmentsTheirPortsAndOtherDevenvVMs(t *testing.T) {
 		"alpha  running  40001     40002         40003     " + kubeconfigs,
 		"beta   none",
 		"",
-		"Other devenv VMs, from other state dirs or deleted ones. Delete one with: smolvm machine delete -f --name <VM>",
+		"These devenv VMs belong to other state dirs, or to deleted ones. Delete one with: smolvm machine delete -f --name <VM>",
 		"devenv-sub-0bee3cf2  running",
 	}
 	if len(got) != len(want) {
