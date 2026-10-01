@@ -17,11 +17,13 @@ const (
 	KubernetesVersion  = "v1.37.0"
 	ClusterctlVersion  = "v1.14.2"
 	MgmtAPIPort        = 6443
+	WorkloadAPIPort    = 7443
 	ContainerdCertsDir = "/etc/devenv/certs.d"
 
 	// Digests avoid a registry round trip, and its rate limit, when the image is cached.
 	dindImage      = "docker:29-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0"
 	dockerCLIImage = "docker:29-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca"
+	socatImage     = "alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e"
 	kindNodeImage  = "kindest/node:" + KubernetesVersion + "@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
 )
 
@@ -157,6 +159,15 @@ func (i *Infra) Tunnel(ctx context.Context, port int) (int, error) {
 		return 0, err
 	}
 	return ports[0].Port(ctx)
+}
+
+// ForwardWorkloadAPI publishes a CAPD cluster's API server on WorkloadAPIPort of the Docker daemon.
+// CAPD's load balancer publishes it on a random port, so a forwarder on the kind network gives it a fixed one.
+func (i *Infra) ForwardWorkloadAPI(ctx context.Context, cluster string) error {
+	_, err := i.Run(ctx, nil, fmt.Sprintf(
+		"docker rm -f %[1]s-api-forward 2>/dev/null; docker run -d --name %[1]s-api-forward --network kind -p %[2]d:6443 %[3]s TCP-LISTEN:6443,fork,reuseaddr TCP:%[1]s-lb:6443",
+		cluster, WorkloadAPIPort, socatImage))
+	return err
 }
 
 // ExportLogs writes logs of every Kind and CAPD cluster, and the CAPI and package resources, to dir on the host.

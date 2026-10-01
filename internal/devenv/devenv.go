@@ -13,6 +13,7 @@ import (
 
 	"dagger.io/dagger"
 	"golang.org/x/sync/errgroup"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/build"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
@@ -35,7 +36,8 @@ type Options struct {
 // Environment is a running environment. It lives until Close.
 type Environment struct {
 	state.Env
-	MgmtKubeconfig string
+	MgmtKubeconfig     string
+	WorkloadKubeconfig string
 	// Packages are rendered Package resources for the first-party bundles in the session registry.
 	Packages [][]byte
 
@@ -135,11 +137,44 @@ func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) err
 	}); err != nil {
 		return err
 	}
-	return ready.Wait(ctx, ready.Gate{
+	if err := ready.Wait(ctx, ready.Gate{
 		Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
 		Check: func(ctx context.Context) error {
 			return kube.PackageInstallReconciled(ctx, dyn, workloadNamespace, remotePackageInstall)
 		},
+	}); err != nil {
+		return err
+	}
+	return e.stage("workload API", func() error { return e.workloadAPI(ctx) })
+}
+
+// workloadAPI tunnels the workload API server to the host and writes its kubeconfig.
+func (e *Environment) workloadAPI(ctx context.Context) error {
+	if err := e.infra.ForwardWorkloadAPI(ctx, workloadCluster); err != nil {
+		return err
+	}
+	port, err := e.infra.Tunnel(ctx, infra.WorkloadAPIPort)
+	if err != nil {
+		return err
+	}
+	mgmt, err := kube.Client(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	secret, err := mgmt.CoreV1().Secrets(workloadNamespace).Get(ctx, workloadCluster+"-kubeconfig", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if e.WorkloadKubeconfig, err = e.WriteKubeconfig("workload", secret.Data["value"], port); err != nil {
+		return err
+	}
+	workload, err := kube.Client(e.WorkloadKubeconfig)
+	if err != nil {
+		return err
+	}
+	return ready.Wait(ctx, ready.Gate{
+		Name: "workload nodes Ready from host", Timeout: 2 * time.Minute, Interval: 2 * time.Second,
+		Check: func(ctx context.Context) error { return kube.NodesReady(ctx, workload) },
 	})
 }
 
@@ -310,8 +345,13 @@ func (e *Environment) Verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	workload, err := kube.Client(e.WorkloadKubeconfig)
+	if err != nil {
+		return err
+	}
 	return errors.Join(
 		kube.NodesReady(ctx, cs),
+		kube.NodesReady(ctx, workload),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
 		kube.ClusterAvailable(ctx, dyn, workloadNamespace, workloadCluster),
 		kube.PackageInstallReconciled(ctx, dyn, workloadNamespace, remotePackageInstall),
