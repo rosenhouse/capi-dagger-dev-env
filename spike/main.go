@@ -93,7 +93,7 @@ func main() {
 func (s *spike) registries(ctx context.Context) {
 	step("session domain")
 	domain := strings.TrimSpace(s.exec(ctx, s.c.Container().From("alpine:3.22").WithEnvVariable("NONCE", nonce()),
-		"awk '/^search/ {print $2}' /etc/resolv.conf"))
+		"awk '/^search/ {for (i = 2; i <= NF; i++) if ($i ~ /[.]dagger[.]local$/) print $i}' /etc/resolv.conf"))
 	fmt.Println("session domain:", domain)
 
 	step("start registry and docker.io mirror")
