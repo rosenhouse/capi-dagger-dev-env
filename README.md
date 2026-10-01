@@ -10,6 +10,8 @@ A Cluster API development environment that runs inside one Dagger session.
 - `fs.inotify.max_user_instances` of at least 512 and `fs.inotify.max_user_watches` of at least 524288
 - About 10 GB of free disk for the Dagger engine
 
+On Apple Silicon macOS, see [docs/macos.md](docs/macos.md).
+
 ## Use
 
 ```sh
