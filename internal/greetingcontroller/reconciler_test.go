@@ -50,6 +50,9 @@ func TestDeploysHelloBehindProxy(t *testing.T) {
 	if vol := proxy.Spec.Template.Spec.Volumes; len(vol) != 1 || vol[0].ConfigMap == nil || vol[0].ConfigMap.Name != "g1-proxy" {
 		t.Errorf("proxy volumes = %v", vol)
 	}
+	if mounts := proxy.Spec.Template.Spec.Containers[0].VolumeMounts; len(mounts) != 1 || mounts[0].MountPath != "/etc/nginx/conf.d" {
+		t.Errorf("proxy mounts = %v, want the config at /etc/nginx/conf.d", mounts)
+	}
 	assertOwnedByGreeting(t, proxy)
 	assertServes(t, get(t, c, &corev1.Service{}, "g1-proxy"), 80, proxy)
 }

@@ -45,7 +45,7 @@ func TestPackageInstallIsOwnedByCluster(t *testing.T) {
 	reconcile(t, r)
 
 	refs := packageInstall(t, c).GetOwnerReferences()
-	if len(refs) != 1 || refs[0].Kind != "Cluster" || refs[0].UID != "cluster-uid" {
+	if len(refs) != 1 || refs[0].Kind != "Cluster" || refs[0].UID != "cluster-uid" || !ptr.Deref(refs[0].Controller, false) {
 		t.Errorf("owner references = %v", refs)
 	}
 }
@@ -70,7 +70,22 @@ func TestRestoresModifiedSpec(t *testing.T) {
 func TestWaitsForControlPlaneInitialization(t *testing.T) {
 	c, r := setup(cluster(false))
 	reconcile(t, r)
+	assertNoPackageInstall(t, c)
+}
 
+func TestSkipsDeletingCluster(t *testing.T) {
+	deleting := cluster(true)
+	deleting.DeletionTimestamp = ptr.To(metav1.Now())
+	deleting.Finalizers = []string{"cluster.cluster.x-k8s.io"}
+	c, r := setup(deleting)
+
+	reconcile(t, r)
+
+	assertNoPackageInstall(t, c)
+}
+
+func assertNoPackageInstall(t *testing.T, c client.Client) {
+	t.Helper()
 	pkgi := &unstructured.Unstructured{}
 	pkgi.SetGroupVersionKind(addonmanager.PackageInstallGVK)
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: "team-a", Name: "work-greeting-controller"}, pkgi)

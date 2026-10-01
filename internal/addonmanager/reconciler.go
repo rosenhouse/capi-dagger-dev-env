@@ -19,23 +19,22 @@ import (
 //go:generate go tool controller-gen rbac:roleName=addon-manager paths=./... output:rbac:dir=../../config/addon-manager
 
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=packaging.carvel.dev,resources=packageinstalls,verbs=get;list;watch;create;update
 
 var PackageInstallGVK = schema.GroupVersionKind{Group: "packaging.carvel.dev", Version: "v1alpha1", Kind: "PackageInstall"}
 
 type Reconciler struct {
 	client.Client
-	// PackageName is the refName of the package to install, e.g. greeting-controller.demo.example.com.
 	PackageName       string
 	VersionConstraint string
-	// TargetNamespace is the namespace in the workload cluster that receives the package's resources.
-	TargetNamespace string
+	TargetNamespace   string
 }
 
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clusterv1.Cluster{}).
-		Owns(r.newPackageInstall()).
+		Owns(newPackageInstall()).
 		Complete(r)
 }
 
@@ -44,12 +43,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !ptr.Deref(cluster.Status.Initialization.ControlPlaneInitialized, false) {
+	if !cluster.DeletionTimestamp.IsZero() || !ptr.Deref(cluster.Status.Initialization.ControlPlaneInitialized, false) {
 		return ctrl.Result{}, nil
 	}
 
 	shortName, _, _ := strings.Cut(r.PackageName, ".")
-	pkgi := r.newPackageInstall()
+	pkgi := newPackageInstall()
 	pkgi.SetNamespace(cluster.Namespace)
 	pkgi.SetName(cluster.Name + "-" + shortName)
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pkgi, func() error {
@@ -73,7 +72,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, err
 }
 
-func (r *Reconciler) newPackageInstall() *unstructured.Unstructured {
+func newPackageInstall() *unstructured.Unstructured {
 	pkgi := &unstructured.Unstructured{}
 	pkgi.SetGroupVersionKind(PackageInstallGVK)
 	return pkgi

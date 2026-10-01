@@ -46,7 +46,7 @@ func main() {
 	}
 	r.Client = mgr.GetClient()
 	r.Remote = cc
-	if err := r.SetupWithManager(mgr); err != nil {
+	if err := r.SetupWithManager(mgr, cc); err != nil {
 		log.Error(err, "set up controller")
 		os.Exit(1)
 	}

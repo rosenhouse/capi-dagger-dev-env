@@ -2,6 +2,8 @@ package greetingsyncer_test
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -52,11 +54,42 @@ func TestUpdatesExistingCopy(t *testing.T) {
 	}
 }
 
-func TestRequeuesUntilClusterIsConnected(t *testing.T) {
+func TestWaitsQuietlyForClusterConnection(t *testing.T) {
 	remote := &fakeRemote{err: clustercache.ErrClusterNotConnected}
 
-	if res := reconcile(t, reconciler(remote, greeting("work", "hi"))); res.RequeueAfter == 0 {
-		t.Error("did not requeue")
+	if res := reconcile(t, reconciler(remote, greeting("work", "hi"))); res.RequeueAfter != 0 {
+		t.Errorf("requeued after %v; the cluster source triggers a reconcile on connect", res.RequeueAfter)
+	}
+}
+
+func TestReturnsOtherRemoteClientErrors(t *testing.T) {
+	r := reconciler(&fakeRemote{err: errors.New("boom")}, greeting("work", "hi"))
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "g1"}}); err == nil {
+		t.Error("swallowed the error")
+	}
+}
+
+func TestGreetingsForClusterSelectsThoseTargetingIt(t *testing.T) {
+	inNamespace := func(ns, name, cluster string) *demov1.Greeting {
+		return &demov1.Greeting{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}, Spec: demov1.GreetingSpec{ClusterName: cluster, Message: "hi"}}
+	}
+	r := &greetingsyncer.Reconciler{Client: newClient(
+		inNamespace("team-a", "a", "work"),
+		inNamespace("team-a", "b", "work"),
+		inNamespace("team-a", "c", "other"),
+		inNamespace("team-b", "d", "work"),
+	)}
+	cluster := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "work"}}
+
+	got := r.GreetingsForCluster(context.Background(), cluster)
+
+	want := []ctrl.Request{
+		{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "a"}},
+		{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "b"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

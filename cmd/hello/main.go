@@ -15,8 +15,8 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", handler(os.Getenv("GREETING"), version)))
 }
 
-func handler(greeting, version string) http.Handler {
+func handler(greeting, buildVersion string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, "%s (hello %s)\n", greeting, version)
+		fmt.Fprintf(w, "%s (hello %s)\n", greeting, buildVersion)
 	})
 }

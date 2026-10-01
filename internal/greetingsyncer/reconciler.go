@@ -1,5 +1,6 @@
 // Package greetingsyncer copies each management-cluster Greeting into the
-// workload cluster named by its spec.clusterName.
+// workload cluster named by its spec.clusterName. Deleting a Greeting leaves
+// its copy in place.
 package greetingsyncer
 
 import (
@@ -23,9 +24,9 @@ import (
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
-const retryInterval = 10 * time.Second
+// crdRetryInterval paces retries while greeting-controller's package installs the CRD remotely.
+const crdRetryInterval = 10 * time.Second
 
-// RemoteClients is satisfied by clustercache.ClusterCache.
 type RemoteClients interface {
 	GetUncachedClient(ctx context.Context, cluster client.ObjectKey) (client.Client, error)
 }
@@ -36,8 +37,27 @@ type Reconciler struct {
 	TargetNamespace string
 }
 
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).For(&demov1.Greeting{}).Complete(r)
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, cc clustercache.ClusterCache) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&demov1.Greeting{}).
+		WatchesRawSource(cc.GetClusterSource("greeting-syncer", r.GreetingsForCluster)).
+		Complete(r)
+}
+
+// GreetingsForCluster maps a Cluster to the Greetings that target it.
+func (r *Reconciler) GreetingsForCluster(ctx context.Context, cluster client.Object) []ctrl.Request {
+	greetings := &demov1.GreetingList{}
+	if err := r.List(ctx, greetings, client.InNamespace(cluster.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "list Greetings")
+		return nil
+	}
+	var requests []ctrl.Request
+	for _, g := range greetings.Items {
+		if g.Spec.ClusterName == cluster.GetName() {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&g)})
+		}
+	}
+	return requests
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -51,8 +71,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	remote, err := r.Remote.GetUncachedClient(ctx, client.ObjectKey{Namespace: g.Namespace, Name: g.Spec.ClusterName})
 	if errors.Is(err, clustercache.ErrClusterNotConnected) {
-		log.FromContext(ctx).Info("Waiting for workload cluster connection", "cluster", g.Spec.ClusterName)
-		return ctrl.Result{RequeueAfter: retryInterval}, nil
+		log.FromContext(ctx).V(1).Info("Waiting for workload cluster connection", "cluster", g.Spec.ClusterName)
+		return ctrl.Result{}, nil
 	}
 	if err != nil {
 		return ctrl.Result{}, err
@@ -66,7 +86,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	})
 	if meta.IsNoMatchError(err) {
 		log.FromContext(ctx).Info("Waiting for Greeting CRD in workload cluster", "cluster", g.Spec.ClusterName)
-		return ctrl.Result{RequeueAfter: retryInterval}, nil
+		return ctrl.Result{RequeueAfter: crdRetryInterval}, nil
 	}
 	return ctrl.Result{}, err
 }
