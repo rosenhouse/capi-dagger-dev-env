@@ -55,6 +55,9 @@ func main() {
 			}
 			testErr := env.Verify(env.Context())
 			if testErr == nil {
+				testErr = errors.Join(e2e.KubectlWorks(env.Context(), env.MgmtKubeconfig), e2e.KubectlWorks(env.Context(), env.WorkloadKubeconfig))
+			}
+			if testErr == nil {
 				testErr = e2e.GreetingReachesWorkloadCluster(env.Context(), env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
 			}
 			if testErr == nil {
