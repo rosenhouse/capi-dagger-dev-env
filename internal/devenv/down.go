@@ -12,7 +12,7 @@ import (
 // Down deletes the VM of the environment called o.Name, or of the only one, or else the only running one.
 // With purge, it also deletes the environment's state dir.
 func Down(ctx context.Context, o Options, purge bool, out io.Writer) error {
-	machines, err := o.SmolVM.List(ctx)
+	machines, err := Machines(ctx, o)
 	if err != nil {
 		return err
 	}
