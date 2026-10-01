@@ -17,9 +17,18 @@ const (
 // Commands are the first-party binaries. Each ships as an image of the same name.
 var Commands = []string{"addon-manager", "greeting-syncer", "greeting-controller", "hello"}
 
-// Source selects the files under root that builds and bundles read.
+// Source selects the Go source of the first-party commands under root.
+// It leaves out the devenv orchestrator and tests, so editing them keeps the build cached.
 func Source(c *dagger.Client, root string) *dagger.Directory {
-	return c.Host().Directory(root, dagger.HostDirectoryOpts{Include: []string{"go.mod", "go.sum", "api/", "cmd/", "internal/", "config/"}})
+	return c.Host().Directory(root, dagger.HostDirectoryOpts{
+		Include: []string{"go.mod", "go.sum", "api/", "cmd/", "internal/"},
+		Exclude: []string{"cmd/devenv/", "internal/devenv/", "**/*_test.go"},
+	})
+}
+
+// Config is the directory of package manifests under root.
+func Config(c *dagger.Client, root string) *dagger.Directory {
+	return c.Host().Directory(root + "/config")
 }
 
 // ModuleRoot returns the nearest directory at or above dir that holds a go.mod.

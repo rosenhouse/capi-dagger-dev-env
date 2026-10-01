@@ -147,19 +147,23 @@ func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client) err
 	if err != nil {
 		return err
 	}
-	src := build.Source(c, root)
 	refs := map[string]string{}
-	for name, image := range build.Images(c, src) {
+	for name, image := range build.Images(c, build.Source(c, root)) {
 		if refs[name], err = reg.Push(ctx, image, name); err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
 		}
 	}
+	config := build.Config(c, root)
 	for _, p := range packages {
-		lock, err := bundle.ImagesLock(subset(refs, p.images))
+		images, err := subset(refs, p.images)
+		if err != nil {
+			return fmt.Errorf("package %s: %w", p.name, err)
+		}
+		lock, err := bundle.ImagesLock(images)
 		if err != nil {
 			return err
 		}
-		ref, err := reg.Push(ctx, bundle.Image(c, src.Directory("config/"+p.name), lock), "bundles/"+p.name)
+		ref, err := reg.Push(ctx, bundle.Image(c, config.Directory(p.name), lock), "bundles/"+p.name)
 		if err != nil {
 			return fmt.Errorf("push bundle %s: %w", p.name, err)
 		}
@@ -172,12 +176,16 @@ func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client) err
 	return nil
 }
 
-func subset(m map[string]string, keys []string) map[string]string {
+func subset(m map[string]string, keys []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, k := range keys {
-		out[k] = m[k]
+		v, ok := m[k]
+		if !ok {
+			return nil, fmt.Errorf("no image %q", k)
+		}
+		out[k] = v
 	}
-	return out
+	return out, nil
 }
 
 // Verify checks the environment from the host through its kubeconfigs.

@@ -40,6 +40,14 @@ type Infra struct {
 	tools *dagger.Container
 }
 
+var session = time.Now().Format(time.RFC3339Nano)
+
+// InSession keys a container's execs to this session. Execs that act on the session's services,
+// such as its daemon or registries, must not reuse results cached by an earlier session.
+func InSession(ctr *dagger.Container) *dagger.Container {
+	return ctr.WithEnvVariable("DEVENV_SESSION", session)
+}
+
 // Preflight fails if the engine's host cannot run Kind.
 func Preflight(ctx context.Context, c *dagger.Client) error {
 	magic, err := c.Container().From(dindImage).WithExec([]string{"stat", "-fc", "%t", "/sys/fs/cgroup"}).Stdout(ctx)
@@ -85,8 +93,7 @@ func Start(ctx context.Context, c *dagger.Client, envID string) (*Infra, error) 
 			WithFile("/usr/local/bin/kind", kind, dagger.ContainerWithFileOpts{Permissions: 0o755}).
 			WithServiceBinding("docker", dind).
 			WithEnvVariable("DOCKER_HOST", "tcp://docker:2375").
-			// Each session acts on a fresh daemon, so its execs must not reuse cached results.
-			WithEnvVariable("DEVENV_SESSION", time.Now().Format(time.RFC3339Nano)),
+			With(InSession),
 	}
 	_, err = i.run(ctx, `docker rm -fv $(docker ps -aq) 2>/dev/null; docker network prune -f && docker volume prune -af`)
 	return i, err

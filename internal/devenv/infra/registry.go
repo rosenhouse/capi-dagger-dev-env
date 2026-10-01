@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"dagger.io/dagger"
 )
@@ -23,6 +22,7 @@ type Registry struct {
 	crane *dagger.Container
 }
 
+// StartRegistry starts the session registry that holds first-party images and bundles.
 func StartRegistry(ctx context.Context, c *dagger.Client) (*Registry, error) {
 	svc, err := c.Container().From(registryImage).WithExposedPort(5000).AsService().Start(ctx)
 	if err != nil {
@@ -32,9 +32,7 @@ func StartRegistry(ctx context.Context, c *dagger.Client) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	crane := c.Container().From(craneImage).
-		WithServiceBinding("registry", svc).
-		WithEnvVariable("DEVENV_SESSION", time.Now().Format(time.RFC3339Nano))
+	crane := c.Container().From(craneImage).With(InSession)
 	resolvConf, err := crane.WithExec([]string{"cat", "/etc/resolv.conf"}).Stdout(ctx)
 	if err != nil {
 		return nil, err
