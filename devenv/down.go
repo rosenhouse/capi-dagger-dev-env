@@ -10,10 +10,10 @@ import (
 
 	"dagger.io/dagger"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/control"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/infra"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/state"
 )
 
 // Down asks the environment's up process to stop and waits for it to exit.

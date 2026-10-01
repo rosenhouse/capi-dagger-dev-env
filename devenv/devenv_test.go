@@ -36,7 +36,7 @@ func TestStageReportsProgressAndNamesFailures(t *testing.T) {
 // Every unpinned image a package's config references must be locked by that package, and vice versa.
 func TestPackageImagesMatchConfigPlaceholders(t *testing.T) {
 	for _, p := range packages {
-		got := placeholders(t, filepath.Join("..", "..", "config", p.name))
+		got := placeholders(t, filepath.Join("..", "config", p.name))
 		want := slices.Clone(p.images)
 		slices.Sort(want)
 		if !slices.Equal(got, want) {

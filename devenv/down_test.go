@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/state"
 )
 
 // TestHelperRunsAnEnvironment stands in for "devenv up" without bringing up any clusters.

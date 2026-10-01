@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/state"
 )
 
 func TestNewRejectsNamesThatAreNotDNSLabels(t *testing.T) {
