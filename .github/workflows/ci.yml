@@ -1,12 +1,16 @@
 name: ci
 on:
   push:
-    branches: [main]
+    branches: [smol]
   pull_request:
+    branches: [smol]
+  workflow_dispatch:
 # A new push to a pull request cancels its older runs.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  SMOLVM_VERSION: 1.22.0
 jobs:
   unit:
     runs-on: ubuntu-24.04
@@ -20,56 +24,29 @@ jobs:
       - run: go test ./...
       - run: go generate ./...
       - run: test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
-  devenv-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - run: go test ./internal/devenv/build/ ./internal/devenv/infra/
-        env:
-          DEVENV_ENGINE_TESTS: "1"
-      - run: go run ./cmd/devenv test --name ci
-      # A second run with the same name checks cleanup, lock release and cache reuse.
-      - run: go run ./cmd/devenv test --name ci
-      - run: go run ./cmd/devenv down --name ci --purge && test ! -e .devenv/ci
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: devenv-${{ matrix.runner }}
-          path: .devenv/
-          include-hidden-files: true
-  concurrent-test:
+  smolvm-smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Two environments at once, one with a random name
-        shell: bash
-        timeout-minutes: 25
+      - name: Enable KVM
         run: |
-          go build -o /tmp/devenv ./cmd/devenv
-          (while sleep 5; do df --output=used -B1G / | tail -1; done > df.log) &
-          /tmp/devenv test --name a 2>&1 | sed -u 's/^/[a] /' & a=$!
-          /tmp/devenv test 2>&1 | sed -u 's/^/[random] /' & r=$!
-          status=0
-          wait $a || status=1
-          wait $r || status=1
-          echo "Peak disk use: $(sort -n df.log | tail -1) GB of $(df --output=size -B1G / | tail -1) GB"
-          exit $status
-      - run: test "$(ls .devenv)" = a
-      - if: failure()
-        uses: actions/upload-artifact@v4
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          grep -m1 'model name' /proc/cpuinfo
+      - name: Install smolvm
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/smol-machines/smolvm/v${SMOLVM_VERSION}/scripts/install.sh" | bash -s -- --version "$SMOLVM_VERSION"
+          echo "$HOME/.smolvm" >> "$GITHUB_PATH"
+      - run: smolvm --version
+      - run: time smolvm machine run --net --image alpine -- uname -a
+      - name: Guest kernel config
+        run: |
+          smolvm machine run --net --image alpine -- sh -c 'zcat /proc/config.gz 2>/dev/null || echo no /proc/config.gz; cat /proc/filesystems; ls /sys/fs/cgroup; cat /sys/fs/cgroup/cgroup.controllers' > guest-kernel.txt || true
+          grep -E 'CONFIG_(MODULES|BRIDGE|BRIDGE_NETFILTER|VETH|VXLAN|IP_VS|IP_SET|NETFILTER_XT_MATCH_(STATISTIC|CONNTRACK|COMMENT|MULTIPORT|ADDRTYPE|PHYSDEV|MARK)|NETFILTER_XT_TARGET_(MASQUERADE|REDIRECT|MARK)|NF_TABLES|NFT_COMPAT|NF_NAT|OVERLAY_FS|MEMCG|CGROUP_BPF|SECCOMP_FILTER|USER_NS|FUSE_FS|BLK_DEV_LOOP)=' guest-kernel.txt || cat guest-kernel.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: devenv-concurrent
-          path: .devenv/
-          include-hidden-files: true
+          name: guest-kernel
+          path: guest-kernel.txt
