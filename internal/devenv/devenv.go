@@ -554,6 +554,14 @@ func (e *Environment) ExportLogs() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	if e.MgmtKubeconfig != "" {
+		// Checking from inside the session tells a failed API server from a failed host tunnel.
+		readyz := "ready"
+		if _, err := e.infra.Run(ctx, nil, "kubectl get --raw=/readyz --request-timeout=10s"); err != nil {
+			readyz = err.Error()
+		}
+		e.progress("management API, from inside the session: " + readyz)
+	}
 	_ = e.infra.ExportLogs(ctx, filepath.Join(e.Dir, "logs"))
 }
 

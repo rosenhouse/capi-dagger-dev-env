@@ -13,7 +13,9 @@ type Gate struct {
 	Name     string
 	Timeout  time.Duration
 	Interval time.Duration
-	Check    func(context.Context) error
+	// Attempt, if set, bounds each check, so a check that hangs is retried.
+	Attempt time.Duration
+	Check   func(context.Context) error
 }
 
 // Wait polls the gate until its check passes. On timeout, the error names the gate and the last check error.
@@ -21,7 +23,7 @@ func Wait(ctx context.Context, g Gate) error {
 	ctx, cancel := context.WithTimeoutCause(ctx, g.Timeout, errTimeout)
 	defer cancel()
 	for {
-		err := g.Check(ctx)
+		err := attempt(ctx, g)
 		if err == nil {
 			return nil
 		}
@@ -37,3 +39,12 @@ func Wait(ctx context.Context, g Gate) error {
 }
 
 var errTimeout = errors.New("gate timeout")
+
+func attempt(ctx context.Context, g Gate) error {
+	if g.Attempt > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, g.Attempt)
+		defer cancel()
+	}
+	return g.Check(ctx)
+}
