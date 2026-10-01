@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/fetch"
 )
@@ -108,6 +109,27 @@ func TestGetGivesUpWithTheLastError(t *testing.T) {
 	}
 	if requests.Load() < 2 {
 		t.Errorf("%d requests, want retries", requests.Load())
+	}
+}
+
+func TestGetRetriesAStalledDownload(t *testing.T) {
+	fetch.SetRetryDelay(t, 0)
+	fetch.SetAttemptTimeout(t, 100*time.Millisecond)
+	stalled := make(chan struct{})
+	defer close(stalled)
+	url, requests := serve(t, func(w http.ResponseWriter) {
+		w.Write([]byte(content[:4]))
+		w.(http.Flusher).Flush()
+		<-stalled
+	}, body(content))
+
+	path, err := fetch.Cache{Dir: t.TempDir()}.Get(t.Context(), fetch.File{URL: url, SHA256: contentSHA})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != content || requests.Load() != 2 {
+		t.Errorf("cached %q after %d requests", got, requests.Load())
 	}
 }
 
