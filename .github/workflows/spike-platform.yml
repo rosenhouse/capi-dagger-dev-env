@@ -17,9 +17,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        restore: [plain, zeroed]
         shmem-thp: [never, always]
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - uses: ./hack/spike/platform/setup
@@ -34,14 +35,26 @@ jobs:
         run: hack/spike/platform/run.sh mgmt
       - name: Cluster API, kapp-controller and the workload cluster
         run: hack/spike/platform/run.sh platform
-      - run: hack/spike/platform/run.sh resources before-branch plat
-      - name: Branch with published ports
-        run: hack/spike/platform/run.sh branch
-      - name: Both API servers from the host
-        run: hack/spike/platform/run.sh host-access
-      - name: Push through the branch port and run the image in both clusters
-        run: hack/spike/platform/run.sh registry
-      - run: hack/spike/platform/run.sh resources after-branch env
+      - name: Checkpoint the platform
+        run: hack/spike/platform/run.sh capture
+      - name: Zero free guest memory and checkpoint again
+        run: hack/spike/platform/run.sh zeroed-capture
+      - name: Restore the ${{ matrix.restore }} checkpoint
+        run: hack/spike/platform/run.sh restore ${{ matrix.restore }}
+      - name: Branch env-a with published ports and wait for the gates
+        run: hack/spike/platform/run.sh env env-a
+      - name: kubectl and the session registry through env-a
+        run: hack/spike/platform/run.sh access env-a 18181 18182
+      - name: Branch env-b and wait for the gates
+        run: hack/spike/platform/run.sh env env-b
+      - name: env-a still passes the gates
+        run: hack/spike/platform/run.sh recheck env-a "after env-b gates"
+      - name: kubectl and the session registry through env-b
+        run: hack/spike/platform/run.sh access env-b 18183 18184
+      - name: Soak both environments for 15 minutes
+        run: hack/spike/platform/run.sh soak
+      - name: Gates, churn and OOM kills after the soak
+        run: hack/spike/platform/run.sh after-soak
       - if: always()
         run: hack/spike/platform/run.sh summary
       - if: failure()
@@ -49,7 +62,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: platform-shmem-thp-${{ matrix.shmem-thp }}
+          name: platform-${{ matrix.restore }}-thp-${{ matrix.shmem-thp }}
           path: |
             ${{ runner.temp }}/platform/
             !${{ runner.temp }}/platform/bin/

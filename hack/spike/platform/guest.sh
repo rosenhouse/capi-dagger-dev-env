@@ -235,9 +235,58 @@ resources() {
 	metric "guest memory used, buff/cache ($1)" "$(free -m | awk '/^Mem:/ { print $3 " MiB, " $6 " MiB of " $2 " MiB" }')"
 	metric "guest /storage used ($1)" "$(df -m /storage | awk 'NR == 2 { print $3 " MiB" }')"
 	metric "guest root overlay used ($1)" "$(df -m / | awk 'NR == 2 { print $3 " MiB" }')"
-	metric "container restarts in mgmt, work ($1)" "$(restarts), $(restarts --kubeconfig /root/work.kubeconfig)"
+}
+
+# Runs before each capture. The capture syncs again, and that sync must finish within 30 s.
+pre_capture() {
+	sync
+	fstrim -v /storage
+	fstrim -v / || true
+}
+
+# Zeroes free guest RAM, so that stale page cache does not reach the checkpoint: capture skips zero pages.
+zero_fill() {
+	sync
+	echo 3 >/proc/sys/vm/drop_caches
+	mkdir -p /mnt/zero
+	mount -t tmpfs -o size=100% zero /mnt/zero
+	mib=$(($(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo) - 1536))
+	t0=$(now)
+	dd if=/dev/zero of=/mnt/zero/fill bs=1M count=$mib 2>/dev/null
+	metric "zero-filled guest memory" "$mib MiB in $(since "$t0")"
+	rm /mnt/zero/fill
+	umount /mnt/zero
+	free -m
+}
+
+# Counters that show churn after a restore or branch: container restarts, leader changes,
+# nodes going NotReady, and Machines replaced by MachineHealthCheck remediation.
+churn() { # label
+	for c in mgmt work; do
+		kc=/root/.kube/config
+		[ $c = mgmt ] || kc=/root/work.kubeconfig
+		metric "$c: container restarts, lease transitions, NodeNotReady events, LeaderElection events ($1)" \
+			"$(restarts --kubeconfig $kc), $(lease_transitions $kc), $(events $kc NodeNotReady), $(events $kc LeaderElection)"
+	done
 	metric "mgmt kube-apiserver restarts ($1)" \
 		"$(kubectl -n kube-system get pod kube-apiserver-mgmt-control-plane -o jsonpath='{.status.containerStatuses[0].restartCount}')"
+	metric "Machines ($1)" "$(kubectl -n default get machines --no-headers -o custom-columns=:.metadata.name,:.status.phase | tr -s ' \n' ' ')"
+	metric "MachineHealthCheck events ($1)" "$(kubectl get events -A --no-headers | grep -ciE 'unhealthy|remediat')"
+}
+
+lease_transitions() { # kubeconfig
+	kubectl --kubeconfig "$1" get leases -A -o jsonpath='{range .items[*]}{.spec.leaseTransitions}{"\n"}{end}' |
+		awk '{ s += $1 } END { print s + 0 }'
+}
+
+events() { # kubeconfig reason
+	kubectl --kubeconfig "$1" get events -A --field-selector reason="$2" --no-headers 2>/dev/null | wc -l
+}
+
+oom_lines() {
+	n=$(dmesg | grep -ciE 'out of memory|oom-kill|killed process' || true)
+	metric "guest kernel OOM lines ($(hostname))" "$n"
+	[ "$n" = 0 ]
 }
 
 # Samples guest CPU for 10 s: the split from /proc/stat, and the busiest processes.
@@ -306,6 +355,10 @@ workload) workload ;;
 workload-wait) workload_wait ;;
 forward) forward ;;
 resources) resources "$2" ;;
+pre-capture) pre_capture ;;
+zero-fill) zero_fill ;;
+churn) churn "$2" ;;
+oom-lines) oom_lines ;;
 cpu-probe) cpu_probe "$2" ;;
 diag) diag ;;
 *) echo "unknown stage $1" >&2; exit 2 ;;
