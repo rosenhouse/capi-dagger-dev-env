@@ -24,31 +24,44 @@ import (
 // because smolvm accepts a connection before anything in the guest answers it.
 const apiAttempt = 30 * time.Second
 
-// platform brings up the VM and everything in it that holds no first-party code: dockerd, the session registry,
-// the management cluster with kapp-controller, CAPI and CAPD, and the workload cluster.
-func (e *Environment) platform(ctx context.Context, leftover smolvm.State) error {
-	cache := fetch.Cache{Dir: filepath.Join(e.cacheDir, "downloads")}
-	downloads, err := infra.Downloads(runtime.GOARCH)
+// boot creates the VM while it fills the download cache.
+func (e *Environment) boot(ctx context.Context, leftover smolvm.State) error {
+	downloads, err := e.downloads()
 	if err != nil {
 		return err
 	}
-	downloads = append(downloads, platform.Downloads()...)
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return e.stage("VM", func() error { return e.createVM(gctx, leftover) }) })
 	g.Go(func() error {
 		return e.stage("downloads", func() error {
 			g, ctx := errgroup.WithContext(gctx)
 			for _, d := range downloads {
-				g.Go(func() error { _, err := cache.Get(ctx, d.File); return err })
+				g.Go(func() error { _, err := e.cache().Get(ctx, d.File); return err })
 			}
 			return g.Wait()
 		})
 	})
-	if err := g.Wait(); err != nil {
+	return g.Wait()
+}
+
+func (e *Environment) downloads() ([]infra.Download, error) {
+	downloads, err := infra.Downloads(runtime.GOARCH)
+	return append(downloads, platform.Downloads()...), err
+}
+
+func (e *Environment) cache() fetch.Cache {
+	return fetch.Cache{Dir: filepath.Join(e.cacheDir, "downloads")}
+}
+
+// platform brings up everything in the VM that holds no first-party code: dockerd, the session registry,
+// the management cluster with kapp-controller, CAPI and CAPD, and the workload cluster.
+func (e *Environment) platform(ctx context.Context) error {
+	downloads, err := e.downloads()
+	if err != nil {
 		return err
 	}
 	if err := e.stage("guest tools", func() error {
-		if err := e.vm.Copy(ctx, cache, downloads); err != nil {
+		if err := e.vm.Copy(ctx, e.cache(), downloads); err != nil {
 			return err
 		}
 		return e.vm.Install(ctx)
@@ -64,7 +77,7 @@ func (e *Environment) platform(ctx context.Context, leftover smolvm.State) error
 	if err := e.stage("management cluster", e.managementCluster(ctx)); err != nil {
 		return err
 	}
-	g, gctx = errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		return e.stage("kapp-controller", func() error { return platform.InstallKappController(gctx, e.vm) })
 	})

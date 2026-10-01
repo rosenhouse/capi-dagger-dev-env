@@ -151,11 +151,15 @@ func (e *Environment) forget() error {
 	return os.Truncate(filepath.Join(e.Dir, "guest.log"), 0)
 }
 
-// bringUp brings up the platform while it builds the first-party images, then installs them.
+// bringUp boots the VM, then builds the first-party images while it brings up the platform, then installs them.
+// The build waits for the boot because both use every CPU, and only the boot is on the critical path.
 func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error {
+	if err := e.boot(ctx, leftover); err != nil {
+		return err
+	}
 	var b build
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.platform(gctx, leftover) })
+	g.Go(func() error { return e.platform(gctx) })
 	g.Go(func() error {
 		return e.stage("build images", func() (err error) { b, err = e.build(gctx, ""); return err })
 	})
