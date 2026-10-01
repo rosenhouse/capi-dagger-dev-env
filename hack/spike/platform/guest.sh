@@ -236,6 +236,11 @@ resources() {
 	metric "guest memory used, buff/cache ($1)" "$(free -m | awk '/^Mem:/ { print $3 " MiB, " $6 " MiB of " $2 " MiB" }')"
 	metric "guest /storage used ($1)" "$(df -m /storage | awk 'NR == 2 { print $3 " MiB" }')"
 	metric "guest root overlay used ($1)" "$(df -m / | awk 'NR == 2 { print $3 " MiB" }')"
+	metric "container restarts in mgmt, work ($1)" "$(restarts), $(restarts --kubeconfig /root/work.kubeconfig)"
+}
+
+restarts() {
+	kubectl "$@" get pods -A --no-headers | awk '{ s += $5 } END { print s }'
 }
 
 diag() {

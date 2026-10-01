@@ -57,6 +57,7 @@ host_tools() {
 boot() {
 	metric "runner CPU" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
 	metric "smolvm" "$(smolvm --version)"
+	metric "host THP shmem_enabled" "$(cat /sys/kernel/mm/transparent_hugepage/shmem_enabled)"
 	smolvm machine create --name $SRC --net --net-backend virtio-net --cpus 4 --mem 12288 --storage 40 --overlay 10
 	timed "first start of the bare VM (--branchable)" smolvm machine start --name $SRC --branchable
 	for f in guest.sh kind-mgmt.yaml kindnet-crs.yaml ../../../internal/devenv/platform/kindnet.yaml; do
@@ -90,11 +91,14 @@ resources() { # label machine-to-inspect
 	local m pid
 	free -m
 	metric "host memory used, available ($1)" "$(free -m | awk '/^Mem:/ { print $3 " MiB, " $7 " MiB" }')"
+	metric "host ShmemHugePages ($1)" "$(awk '/^ShmemHugePages:/ { print int($2 / 1024) " MiB" }' /proc/meminfo)"
 	for m in $(smolvm machine ls -q); do
 		pid=$(smolvm machine status --name "$m" --json | jq -r .pid)
-		grep -E '^(Rss|Pss|Pss_Anon|Pss_Shmem):' "/proc/$pid/smaps_rollup"
+		# A branch child's VMM is not readable by its own user.
+		sudo cat "/proc/$pid/smaps_rollup" >"$OUT/smaps-$m-$1.txt"
+		grep -E '^(Rss|Pss|Pss_Anon|Pss_Shmem):' "$OUT/smaps-$m-$1.txt"
 		metric "VMM $m Rss, Pss, Pss_Shmem ($1)" \
-			"$(awk '/^(Rss|Pss|Pss_Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' "/proc/$pid/smaps_rollup")"
+			"$(awk '/^(Rss|Pss|Pss_Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' "$OUT/smaps-$m-$1.txt")"
 		metric "host disk of $m ($1)" "$(du -sm "$(smolvm machine data-dir --name "$m")" | cut -f1) MiB"
 	done
 	guest "$2" resources "$1"
@@ -109,13 +113,37 @@ branch() {
 			return 1
 		fi
 	done
+	vmstat -t 5 >"$OUT/vmstat.log" 2>&1 &
 	timed "branch --freeze-source with 3 published ports" smolvm machine branch --from $SRC --name $ENV --freeze-source \
 		-p $H_MGMT:6443 -p $H_WORK:7443 -p $H_REG:5000
+	now >"$OUT/branched-at"
+	vmm_stat $ENV >"$OUT/env-stat-at-branch"
+	monitor >"$OUT/monitor.log" 2>&1 &
 	metric "source state after branch" "$(smolvm machine status --name $SRC --json | jq -r .state)"
 	smolvm machine ls -v
 }
 
+# vmm_stat <machine> prints the VMM's minor faults, major faults and CPU seconds.
+# The process name has a space, so fields count from after its closing parenthesis.
+vmm_stat() {
+	local pid
+	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
+	sudo cat "/proc/$pid/stat" | sed 's/.*) //' | awk '{ printf "%d %d %.1f\n", $8, $10, ($12 + $13) / 100 }'
+}
+
+monitor() {
+	while :; do
+		echo "$(date +%T) $SRC $(vmm_stat $SRC) $ENV $(vmm_stat $ENV)"
+		sleep 5
+	done
+}
+
 readyz() { curl -fsSk --max-time 5 "https://localhost:$1/readyz" >/dev/null; }
+
+wait_readyz() { # name port start
+	retry 600 readyz "$2"
+	metric "$1 /readyz answers from the host, after branch" "$(since "$3")"
+}
 
 kubeconfig() { # guest-path host-port name
 	smolvm machine exec --name $ENV -- cat "$1" | sed "s#server: https://.*#server: https://localhost:$2#" >"$OUT/$3.kubeconfig"
@@ -139,12 +167,23 @@ kubectl_works() { # cluster local-port
 }
 
 host_access() {
-	timed "mgmt /readyz from the host after branch" retry 300 readyz $H_MGMT
-	timed "work /readyz from the host after branch" retry 300 readyz $H_WORK
+	local t0 mgmt work
+	t0=$(cat "$OUT/branched-at")
+	wait_readyz mgmt $H_MGMT "$t0" &
+	mgmt=$!
+	wait_readyz work $H_WORK "$t0" &
+	work=$!
+	wait $mgmt
+	wait $work
+	metric "env VMM minor faults, major faults, CPU s from branch to both /readyz" \
+		"$(echo "$(cat "$OUT/env-stat-at-branch") $(vmm_stat $ENV)" | awk '{ printf "%d, %d, %.1f s", $4 - $1, $5 - $2, $6 - $3 }')"
 	kubeconfig /root/.kube/config $H_MGMT mgmt
 	kubeconfig /root/work.kubeconfig $H_WORK work
 	timed "mgmt kubectl checks from the host" kubectl_works mgmt 18181
 	timed "work kubectl checks from the host" kubectl_works work 18182
+	timed "Cluster work Available from the host" \
+		kubectl --kubeconfig "$OUT/mgmt.kubeconfig" -n default wait --for=condition=Available cluster/work --timeout=10m
+	cat "$OUT/monitor.log" "$OUT/vmstat.log"
 }
 
 registry() {
