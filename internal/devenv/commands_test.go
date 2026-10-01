@@ -20,6 +20,11 @@ func TestStatusListsEnvironmentsTheirPortsAndOtherDevenvVMs(t *testing.T) {
 			{Name: "unrelated", State: smolvm.Running},
 		}
 	})
+	save, err := f.o.platformSaveEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeMachines(f.dir, append(f.machines(), smolvm.Machine{Name: save.VM(), State: smolvm.Running}))
 	writeLastRun(t, f.env)
 	if err := f.env.WritePorts(state.Ports{MgmtAPI: 40001, WorkloadAPI: 40002, Registry: 40003}); err != nil {
 		t.Fatal(err)
@@ -43,6 +48,8 @@ func TestStatusListsEnvironmentsTheirPortsAndOtherDevenvVMs(t *testing.T) {
 		"NAME   VM       MGMT API  WORKLOAD API  REGISTRY  KUBECONFIGS",
 		"alpha  running  40001     40002         40003     " + kubeconfigs,
 		"beta   none",
+		"",
+		"VM " + save.VM() + " is platform save's: running",
 		"",
 		"These devenv VMs belong to other state dirs, or to deleted ones. Delete one with: smolvm machine delete -f --name <VM>",
 		"devenv-sub-0bee3cf2  running",

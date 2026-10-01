@@ -3,6 +3,7 @@ package smolvm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -39,8 +40,10 @@ func (c CLI) Create(ctx context.Context, name string, cfg MachineConfig) error {
 
 // CreateFromCheckpoint creates a machine whose first start resumes the checkpoint file.
 // The machine keeps the checkpoint's host ports; RebindPorts changes them.
+// Once smolvm has begun, it lets it finish and only then returns ctx's error,
+// because smolvm interrupted leaves its partial copy of the checkpoint where Delete cannot see it.
 func (c CLI) CreateFromCheckpoint(ctx context.Context, name, file string) error {
-	return c.do(ctx, "machine", "create", "--name", name, "--from", file)
+	return c.finish(ctx, "machine", "create", "--name", name, "--from", file)
 }
 
 // RebindPorts removes and adds published ports of a machine that is not running.
@@ -51,7 +54,7 @@ func (c CLI) RebindPorts(ctx context.Context, name string, remove, add []Port) e
 }
 
 type StartOptions struct {
-	// Branchable lets the machine be branched and checkpointed. A machine created from a checkpoint is branchable without it.
+	// Branchable lets the machine be checkpointed. A machine created from a checkpoint is branchable without it.
 	Branchable bool
 	// NoIdleReclaim stops smolvm from squeezing the guest's memory to a fifth for a moment after ten idle minutes.
 	NoIdleReclaim bool
@@ -61,9 +64,6 @@ type StartOptions struct {
 // Once smolvm has begun, Start lets it finish and only then returns ctx's error,
 // because a VM whose start smolvm was interrupted in runs on where Delete cannot see it.
 func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	// A bare VM pulls no image. Without --proxy, smolvm fails if the host's proxy listens only on loopback.
 	args := []string{"machine", "start", "--name", name, "--proxy", ""}
 	if opts.Branchable {
@@ -72,6 +72,14 @@ func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
 	if opts.NoIdleReclaim {
 		c.env = append(slices.Clip(c.env), "SMOLVM_IDLE_RECLAIM=off")
 	}
+	return c.finish(ctx, args...)
+}
+
+// finish runs smolvm unless ctx has ended. It lets smolvm finish even if ctx ends meanwhile, then returns ctx's error.
+func (c CLI) finish(ctx context.Context, args ...string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	err := c.do(context.WithoutCancel(ctx), args...)
 	if ctx.Err() != nil {
 		return fmt.Errorf("smolvm %s: %w", commandLine(args), ctx.Err())
@@ -79,37 +87,18 @@ func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
 	return err
 }
 
+// AgentTimedOut reports whether a start failed because a restored machine's agent did not answer within smolvm's fixed 30 s.
+func AgentTimedOut(err error) bool {
+	var exit *ExitError
+	return errors.As(err, &exit) && strings.Contains(exit.Stderr, "agent did not respond to ping within timeout")
+}
+
 func (c CLI) Stop(ctx context.Context, name string) error {
 	return c.do(ctx, "machine", "stop", "--name", name)
 }
 
-type DeleteOptions struct {
-	// Cascade also deletes the machine's branches.
-	Cascade bool
-}
-
-func (c CLI) Delete(ctx context.Context, name string, opts DeleteOptions) error {
-	args := []string{"machine", "delete", "--name", name, "-f"}
-	if opts.Cascade {
-		args = append(args, "--cascade")
-	}
-	return c.do(ctx, args...)
-}
-
-type BranchOptions struct {
-	// FreezeSource pauses the source for good, as a base for more branches.
-	FreezeSource bool
-	// With Ports, the branch publishes only these. Without them, smolvm republishes the source's guest ports on free host ports.
-	Ports []Port
-}
-
-// Branch creates and starts a copy-on-write copy of a running, branchable machine.
-func (c CLI) Branch(ctx context.Context, from, name string, opts BranchOptions) error {
-	args := []string{"machine", "branch", "--from", from, "--name", name}
-	if opts.FreezeSource {
-		args = append(args, "--freeze-source")
-	}
-	return c.do(ctx, withPorts(args, "-p", opts.Ports)...)
+func (c CLI) Delete(ctx context.Context, name string) error {
+	return c.do(ctx, "machine", "delete", "--name", name, "-f")
 }
 
 // Checkpoint saves a running, branchable machine, including its RAM, to file. The file name must end in ".checkpoint".
@@ -123,15 +112,11 @@ const (
 	Created State = "created"
 	Running State = "running"
 	Stopped State = "stopped"
-	// Frozen is the state of a source that FreezeSource paused.
-	Frozen State = "frozen"
 )
 
 type Machine struct {
 	Name  string `json:"name"`
 	State State  `json:"state"`
-	// Parent names the machine this one branched from.
-	Parent string `json:"parent_machine"`
 }
 
 func (c CLI) List(ctx context.Context) ([]Machine, error) {

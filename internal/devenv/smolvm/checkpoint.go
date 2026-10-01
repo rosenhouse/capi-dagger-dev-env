@@ -15,8 +15,8 @@ import (
 // smolvm still refuses to restore a checkpoint on an incompatible CPU.
 const UnknownContract = "unknown"
 
-// HostContract returns the CPU contract that smolvm records in checkpoints taken on this host,
-// in CheckpointContract's form.
+// HostContract returns the CPU contract that smolvm records in checkpoints taken on this host:
+// "linux-kvm-intel-portable-v1", or "exact-v1-" and a fingerprint.
 func HostContract() (string, error) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return UnknownContract, nil
@@ -48,29 +48,39 @@ func linuxAMD64Contract(cpuinfo string) string {
 	return "exact-v1-" + hex.EncodeToString(sum[:])
 }
 
-// CheckpointContract returns the CPU contract recorded in a checkpoint file:
-// "linux-kvm-intel-portable-v1", "exact-v1-" and a fingerprint, or the name of another kind.
-func CheckpointContract(file string) (string, error) {
+// CheckpointPorts returns the host ports that a machine restored from a checkpoint file publishes until RebindPorts.
+func CheckpointPorts(file string) ([]Port, error) {
+	c, err := readCheckpoint(file)
+	if err != nil {
+		return nil, err
+	}
+	var ports []Port
+	for _, p := range c.Network.Ports {
+		ports = append(ports, Port{Host: p.Host, Guest: p.Guest})
+	}
+	return ports, nil
+}
+
+type checkpointManifest struct {
+	CPUContract struct{ Kind, Fingerprint string } `json:"cpu_contract"`
+	Network     struct {
+		Ports []struct{ Host, Guest int }
+	}
+}
+
+func readCheckpoint(file string) (checkpointManifest, error) {
 	manifest, err := readManifest(file)
 	if err != nil {
-		return "", err
+		return checkpointManifest{}, err
 	}
-	var m struct {
-		Checkpoint struct {
-			CPUContract struct{ Kind, Fingerprint string } `json:"cpu_contract"`
-		}
-	}
+	var m struct{ Checkpoint *checkpointManifest }
 	if err := json.Unmarshal(manifest, &m); err != nil {
-		return "", fmt.Errorf("%s: %w", file, err)
+		return checkpointManifest{}, fmt.Errorf("%s: %w", file, err)
 	}
-	contract := m.Checkpoint.CPUContract
-	if contract.Kind == "" {
-		return "", fmt.Errorf("%s: manifest has no checkpoint CPU contract", file)
+	if m.Checkpoint == nil {
+		return checkpointManifest{}, fmt.Errorf("%s: a pack without a checkpoint", file)
 	}
-	if contract.Fingerprint != "" {
-		return contract.Kind + "-" + contract.Fingerprint, nil
-	}
-	return contract.Kind, nil
+	return *m.Checkpoint, nil
 }
 
 // readManifest reads a checkpoint's manifest, which sits just before a 64-byte footer that gives its size.

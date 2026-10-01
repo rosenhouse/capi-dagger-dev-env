@@ -47,6 +47,15 @@ func hasTrueCondition(obj unstructured.Unstructured, conditionType string) bool 
 	return false
 }
 
+// PackageGVR is served by kapp-controller itself, through an aggregated API.
+var PackageGVR = schema.GroupVersionResource{Group: "data.packaging.carvel.dev", Version: "v1alpha1", Resource: "packages"}
+
+// PackagesServed returns nil when kapp-controller answers for Packages.
+func PackagesServed(ctx context.Context, dyn dynamic.Interface) error {
+	_, err := dyn.Resource(PackageGVR).Namespace("default").List(ctx, metav1.ListOptions{Limit: 1})
+	return err
+}
+
 // PackageInstallReconciled returns nil when the named PackageInstall reports ReconcileSucceeded.
 func PackageInstallReconciled(ctx context.Context, dyn dynamic.Interface, namespace, name string) error {
 	pkgi, err := dyn.Resource(PackageInstallGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})

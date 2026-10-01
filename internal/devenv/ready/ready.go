@@ -21,7 +21,7 @@ type Gate struct {
 	Log io.Writer
 }
 
-// Wait polls the gate until its check passes. On timeout, the error names the gate
+// Wait polls the gate until its check passes. If its timeout or ctx ends first, the error names the gate
 // and the error of the last check that the timeout did not cut short.
 func Wait(ctx context.Context, g Gate) error {
 	start := time.Now()
@@ -40,10 +40,10 @@ func Wait(ctx context.Context, g Gate) error {
 		}
 		select {
 		case <-ctx.Done():
-			if errors.Is(context.Cause(ctx), errTimeout) {
-				return fmt.Errorf("gate %q not met within %v: %w", g.Name, g.Timeout, last)
+			if cause := context.Cause(ctx); !errors.Is(cause, errTimeout) {
+				return fmt.Errorf("gate %q: %w; last check: %v", g.Name, cause, last)
 			}
-			return ctx.Err()
+			return fmt.Errorf("gate %q not met within %v: %w", g.Name, g.Timeout, last)
 		case <-time.After(g.Interval):
 		}
 	}

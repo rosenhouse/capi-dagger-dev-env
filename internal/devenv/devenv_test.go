@@ -2,6 +2,7 @@ package devenv
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,7 +34,12 @@ func TestMain(m *testing.M) {
 }
 
 // fakeSmolvmMain appends each call to dir/calls and keeps the machines in dir/machines.json.
-// It prints FAKE_SMOLVM_VERSION for --version, and fails calls that start with FAKE_SMOLVM_FAIL.
+// It prints FAKE_SMOLVM_VERSION for --version, and FAKE_SMOLVM_EXEC_STDOUT for machine exec.
+// It fails calls that start with FAKE_SMOLVM_FAIL, printing FAKE_SMOLVM_FAIL_STDERR, or only the first such call
+// with FAKE_SMOLVM_FAIL_ONCE set. FAKE_SMOLVM_SLEEP=<prefix>=<duration> slows calls that start with prefix.
+// It links the checkpoint of a create --from to dir/restored-from, and fails the create if the checkpoint's links
+// change meanwhile, as smolvm fails when the checkpoint's ctime changes while it verifies it.
+// Calls change machines one at a time, as smolvm's own database serializes them, but sleep at once.
 func fakeSmolvmMain(dir string, args []string) int {
 	call := strings.Join(args, " ")
 	f, err := os.OpenFile(filepath.Join(dir, "calls"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -41,9 +48,45 @@ func fakeSmolvmMain(dir string, args []string) int {
 	}
 	fmt.Fprintln(f, call)
 	f.Close()
+	var from string
+	var verifying syscall.Stat_t
+	if i := slices.Index(args, "--from"); i >= 0 {
+		from = args[i+1]
+		if err := syscall.Stat(from, &verifying); err != nil {
+			panic(err)
+		}
+	}
+	if prefix, d, ok := strings.Cut(os.Getenv("FAKE_SMOLVM_SLEEP"), "="); ok && strings.HasPrefix(call, prefix) {
+		sleep, err := time.ParseDuration(d)
+		if err != nil {
+			panic(err)
+		}
+		time.Sleep(sleep)
+	}
+	if from != "" {
+		var verified syscall.Stat_t
+		if err := syscall.Stat(from, &verified); err != nil || verified.Nlink != verifying.Nlink {
+			fmt.Fprintf(os.Stderr, "Error: agent operation failed: verify checkpoint checksum: %s changed while it was being verified\n", from)
+			return 1
+		}
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		panic(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		panic(err)
+	}
 	if fail := os.Getenv("FAKE_SMOLVM_FAIL"); fail != "" && strings.HasPrefix(call, fail) {
-		fmt.Fprintln(os.Stderr, "fake failure")
-		return 1
+		failed := filepath.Join(dir, "failed")
+		if _, err := os.Stat(failed); os.Getenv("FAKE_SMOLVM_FAIL_ONCE") == "" || errors.Is(err, os.ErrNotExist) {
+			if err := os.WriteFile(failed, nil, 0o600); err != nil {
+				panic(err)
+			}
+			fmt.Fprintln(os.Stderr, cmp.Or(os.Getenv("FAKE_SMOLVM_FAIL_STDERR"), "fake failure"))
+			return 1
+		}
 	}
 	machines := readMachines(dir)
 	name := ""
@@ -59,6 +102,15 @@ func fakeSmolvmMain(dir string, args []string) int {
 		fmt.Println(string(data))
 	case strings.HasPrefix(call, "machine create "):
 		machines = append(machines, smolvm.Machine{Name: name, State: smolvm.Created})
+		if i := slices.Index(args, "--from"); i >= 0 {
+			restoredFrom := filepath.Join(dir, "restored-from")
+			if err := os.Remove(restoredFrom); err != nil && !errors.Is(err, os.ErrNotExist) {
+				panic(err)
+			}
+			if err := os.Link(args[i+1], restoredFrom); err != nil {
+				panic(err)
+			}
+		}
 	case strings.HasPrefix(call, "machine start "):
 		machines[slices.IndexFunc(machines, named)].State = smolvm.Running
 		if err := os.WriteFile(filepath.Join(dir, "idle-reclaim"), []byte(os.Getenv("SMOLVM_IDLE_RECLAIM")), 0o600); err != nil {
@@ -66,6 +118,12 @@ func fakeSmolvmMain(dir string, args []string) int {
 		}
 	case strings.HasPrefix(call, "machine delete "):
 		machines = slices.DeleteFunc(machines, named)
+	case strings.HasPrefix(call, "machine exec "):
+		fmt.Print(os.Getenv("FAKE_SMOLVM_EXEC_STDOUT"))
+	case strings.HasPrefix(call, "machine checkpoint "):
+		if err := os.WriteFile(args[slices.Index(args, "-o")+1], []byte("checkpoint"), 0o600); err != nil {
+			panic(err)
+		}
 	}
 	writeMachines(dir, machines)
 	return 0
@@ -88,7 +146,11 @@ func writeMachines(dir string, machines []smolvm.Machine) {
 	if err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "machines.json"), data, 0o600); err != nil {
+	tmp := filepath.Join(dir, ".machines.json")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, "machines.json")); err != nil {
 		panic(err)
 	}
 }
@@ -232,6 +294,23 @@ func TestUpRefusesAReadyEnvironmentWhoseVMIsRunning(t *testing.T) {
 	}
 	if log, err := os.ReadFile(filepath.Join(f.env.Dir, "guest.log")); err != nil || string(log) != "kind create cluster\n" {
 		t.Errorf("guest.log of the running environment = %q, %v", log, err)
+	}
+}
+
+func TestUpMarksTheEnvironmentReadyOnceItIsUp(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	fakeHost(t, f)
+	bringUp = func(*Environment, context.Context, smolvm.State) error { return nil }
+	t.Cleanup(func() { bringUp = (*Environment).bringUp })
+
+	e, err := Up(t.Context(), f.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	if !f.env.Ready() {
+		t.Error("not ready")
 	}
 }
 
@@ -419,7 +498,7 @@ func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
-	err = e.createVM(ctx, "")
+	err = e.createVM(ctx, "", false)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v", err)
@@ -429,12 +508,28 @@ func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
 	}
 }
 
+func TestBuildWaitsWhileAnotherEnvironmentBuilds(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	e := f.open(t)
+	unlock, err := state.WaitLock(t.Context(), filepath.Join(f.o.CacheDir, "build.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	if _, err := e.buildImages(ctx, ""); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Stopped))
 	env := f.env
 	e := f.open(t)
 
-	if err := e.createVM(t.Context(), smolvm.Stopped); err != nil {
+	if err := e.createVM(t.Context(), smolvm.Stopped, false); err != nil {
 		t.Fatal(err)
 	}
 

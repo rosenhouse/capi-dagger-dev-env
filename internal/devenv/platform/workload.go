@@ -13,7 +13,11 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 )
 
-const podCIDR = "192.168.0.0/16"
+const (
+	podCIDR = "192.168.0.0/16"
+	// nodeCertsDir is where containerd in a CAPD node reads registry config.
+	nodeCertsDir = "/etc/containerd/certs.d"
+)
 
 //go:embed kindnet.yaml
 var kindnet string
@@ -25,7 +29,7 @@ func CreateWorkloadCluster(ctx context.Context, vm *infra.VM, name, namespace st
 	if err != nil {
 		return err
 	}
-	patched, err := patchClusterClass([]byte(clusterClass), namespace, infra.ContainerdCertsDir, "/etc/containerd/certs.d")
+	patched, err := patchClusterClass([]byte(clusterClass), namespace, infra.ContainerdCertsDir, nodeCertsDir)
 	if err != nil {
 		return err
 	}
@@ -36,10 +40,14 @@ func CreateWorkloadCluster(ctx context.Context, vm *infra.VM, name, namespace st
 	if err := Apply(ctx, vm, append(append(patched, "\n---\n"...), crs...)); err != nil {
 		return err
 	}
-	return vm.Run(ctx, fmt.Sprintf(`POD_CIDR='[%[5]q]' clusterctl generate cluster %[1]s --config %[6]s/clusterctl.yaml --from %[3]s \
+	return vm.Run(ctx, workloadClusterScript(name, namespace))
+}
+
+func workloadClusterScript(name, namespace string) string {
+	return fmt.Sprintf(`POD_CIDR='[%[5]q]' clusterctl generate cluster %[1]s --config %[6]s/clusterctl.yaml --from %[3]s \
   --kubernetes-version %[4]s --control-plane-machine-count 1 --worker-machine-count 1 --target-namespace %[2]s | kubectl apply -f - >/dev/null
 kubectl -n %[2]s label cluster %[1]s cni=kindnet --overwrite >/dev/null`,
-		name, namespace, providerPath("infrastructure-docker", "cluster-template-development.yaml"), infra.KubernetesVersion, podCIDR, repo))
+		name, namespace, providerPath("infrastructure-docker", "cluster-template-development.yaml"), infra.KubernetesVersion, podCIDR, repo)
 }
 
 // patchClusterClass puts every object in manifests into namespace, and adds a host mount

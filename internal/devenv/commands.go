@@ -136,7 +136,14 @@ func Status(ctx context.Context, o Options, out io.Writer) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	others := state.Unclaimed(envs, machines)
+	save, err := o.platformSaveEnv()
+	if err != nil {
+		return err
+	}
+	if s := save.VMState(machines); s != "" {
+		fmt.Fprintf(out, "\nVM %s is platform save's: %s\n", save.VM(), s)
+	}
+	others := state.Unclaimed(append(envs, save), machines)
 	if len(others) == 0 {
 		return nil
 	}

@@ -22,4 +22,6 @@ To validate devenv on smolvm, run these from a clean checkout and report the res
    6. `kubectl -n kube-system port-forward deploy/coredns 8080`, then `curl localhost:8080/health` in another terminal prints `OK`.
    7. Edit the reply format in `cmd/hello/main.go`, then `go run ./cmd/devenv redeploy --name mac` prints `Redeployed environment mac.`
    8. `go run ./cmd/devenv down --name mac --purge` deletes the VM and removes `.devenv/mac`.
-4. Report smolvm's version, the macOS version, the chip, and the times from steps 1 and 2.
+4. `time go run ./cmd/devenv platform save` prints `Saved` and the checkpoint's path.
+5. `time go run ./cmd/devenv test --warm --name mac` prints `platform: restoring` and exits 0.
+6. Report smolvm's version, the macOS version, the chip, the times from steps 1, 2, 4 and 5, and the checkpoint's size.
