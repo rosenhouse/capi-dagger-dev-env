@@ -33,7 +33,7 @@ timed() { # name command...
 
 # guest <machine> <stage> [arg]: runs a guest.sh stage and records its metric lines.
 guest() {
-	local log="$OUT/guest-$1-$2${3:+-${3//[^a-z0-9]/-}}.log" rc=0
+	local log="$OUT/guest-$1-$2${3:+-${3//[^a-zA-Z0-9]/-}}.log" rc=0
 	smolvm machine exec --name "$1" --stream --timeout 30m -- sh /root/guest.sh "${@:2}" | tee "$log" || rc=$?
 	sed -n 's/^metric|\(.*\)|\(.*\)$/| \1 | \2 |/p' "$log" >>"$METRICS"
 	return "$rc"
@@ -115,9 +115,9 @@ host_meminfo() { # label
 vmm_memory() { # machine label
 	local pid
 	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
-	sudo cat "/proc/$pid/smaps_rollup" >"$OUT/smaps-$1-${2//[^a-z0-9]/-}.txt"
+	sudo cat "/proc/$pid/smaps_rollup" >"$OUT/smaps-$1-${2//[^a-zA-Z0-9]/-}.txt"
 	metric "VMM $1 Rss, Pss, Pss_Shmem ($2)" \
-		"$(awk '/^(Rss|Pss|Pss_Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' "$OUT/smaps-$1-${2//[^a-z0-9]/-}.txt")"
+		"$(awk '/^(Rss|Pss|Pss_Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' "$OUT/smaps-$1-${2//[^a-zA-Z0-9]/-}.txt")"
 }
 
 vmm_pss() { # machine: the VMM's Pss in MiB
@@ -234,6 +234,9 @@ restore() {
 	metric "restore: guest uptime advance over the same span" "$(awk -v a="$u0" -v b="$u1" 'BEGIN { printf "%.1f s", b - a }')"
 	metric "restore: guest clock minus host clock" "$(clock_offset $SRC)"
 	vmm_memory $SRC "after restore"
+	host_meminfo "after restore"
+	df -m / /dev/shm /tmp /run
+	sudo ls -la /dev/shm
 	monitor >"$OUT/monitor.log" 2>&1 &
 	echo $! >"$OUT/monitor.pid"
 }
@@ -292,7 +295,7 @@ deployments_available() { # env
 gate() {
 	local name=$1 t0=$2
 	shift 2
-	if retry 900 "$@" >>"$OUT/gate-${name//[^a-z0-9]/-}.log" 2>&1; then
+	if retry 900 "$@" >>"$OUT/gate-${name//[^a-zA-Z0-9]/-}.log" 2>&1; then
 		metric "$name" "$(since "$t0")"
 	else
 		metric "$name" "FAILED after $(since "$t0")"
