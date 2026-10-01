@@ -12,8 +12,6 @@ mountpoint -q $tracing || mount -t tracefs none $tracing
 
 # event;histogram keys and values. madvise shows the balloon handing guest pages back with MADV_DONTNEED.
 EVENTS="kvm/kvm_exit;keys=exit_reason:vals=hitcount
-	kvm/kvm_page_fault;keys=error_code:vals=hitcount
-	kvmmmu/kvm_mmu_spte_requested;keys=level:vals=hitcount
 	kvm/kvm_unmap_hva_range;keys=common_pid.execname:vals=hitcount
 	syscalls/sys_enter_madvise;keys=common_pid.execname,behavior:vals=hitcount,len_in"
 for e in $EVENTS; do

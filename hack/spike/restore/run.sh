@@ -267,7 +267,7 @@ branch() {
 	kubeconfigs env
 	phase start-env env
 	t0=$(now)
-	timed "env: branch --freeze-source ${extra[*]}" \
+	timed "env: branch --freeze-source${extra[*]:+ ${extra[*]}}" \
 		smolvm machine branch --from src --name env --freeze-source "${extra[@]}" -p "$m:6443" -p "$w:7443" -p "$r:5000"
 	started env
 	gates env "$t0" "after branch"

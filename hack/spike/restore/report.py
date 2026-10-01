@@ -37,11 +37,6 @@ def exit_name(code, amd):
     return f"svm{code:#x}"
 
 
-def fault_name(code):
-    bits = [n for b, n in ((1, "present"), (2, "write"), (4, "user"), (16, "fetch")) if code & b]
-    return "+".join(bits) or "not-present-read"
-
-
 MADVISE = {4: "DONTNEED", 8: "FREE", 9: "REMOVE", 14: "HUGEPAGE", 15: "NOHUGEPAGE", 22: "POPULATE_READ",
            23: "POPULATE_WRITE", 25: "COLLAPSE"}
 
@@ -115,8 +110,6 @@ def read_guest(path):
         elif kind == "S":
             cur["cpu"] = [int(x) for x in f[1:9]]
             cur.update({f[i]: int(f[i + 1]) for i in range(11, len(f) - 1, 2)})
-        elif kind == "V":
-            cur["vm"] = {k: int(v) for k, _, v in (t.partition("=") for t in f)}
         elif kind == "I":
             cur["irq"] = {k: int(v) for k, _, v in (t.partition(":") for t in f)}
         elif kind == "R":
@@ -175,8 +168,6 @@ def host_stats(win, pid, amd):
         hdt = hists[-1]["t"] - hists[0]["t"]
         for event, label, name, scale in (
                 ("kvm/kvm_exit", "exits", lambda k: exit_name(int(k), amd), 1),
-                ("kvm/kvm_page_fault", "faults", lambda k: fault_name(int(k, 0)), 1),
-                ("kvmmmu/kvm_mmu_spte_requested", "spte_requested_level", str, 1),
                 ("kvm/kvm_unmap_hva_range", "unmap_hva_range", str, 1),
                 ("syscalls/sys_enter_madvise", "madvise_mib", madvise_name, 2 ** -20)):
             rates = defaultdict(float)
@@ -206,9 +197,6 @@ def guest_stats(win):
     for k in ("LOC", "RES", "CAL", "TLB", "DEV"):
         if k in a.get("irq", {}) and k in b.get("irq", {}):
             out[f"guest_{k}_s"] = (b["irq"][k] - a["irq"][k]) / dt
-    for k in ("pgfault", "pgmajfault", "pgfree", "pgscan_kswapd", "compact_stall", "thp_fault_alloc"):
-        if k in a.get("vm", {}) and k in b.get("vm", {}):
-            out[f"guest_{k}_s"] = (b["vm"][k] - a["vm"][k]) / dt
     probes = [s["readyz"] for s in win if "readyz" in s]
     if probes:
         out["readyz_ok_mgmt_pct"] = 100 * sum(p[0] == "200" for p in probes) / len(probes)
@@ -252,10 +240,11 @@ def main():
 
     print("### Phases\n")
     print("VMM cores split the CPU time of the machine's VMM into guest mode, host kernel and VMM user space."
-          " Exits, remote TLB flushes and MMU invalidations are KVM counts; invalidations are those that vCPU"
-          " threads cause, as copy-on-write faults do. madvise is host memory that VMM threads release.\n")
+          " Exits and remote TLB flushes are KVM counts. MMU invalidations are host page-table changes"
+          " under a VM's memory, such as copy-on-write faults, with the thread that caused most of them."
+          " madvise is host memory that threads release.\n")
     print("| phase | machine | s | guest user, sys, idle % | VMM cores guest, kernel, user | VMM minflt/s |"
-          " KVM exits/s | top exits/s | remote TLB flushes/s | MMU invalidations by vCPUs/s | madvise MiB/s |"
+          " KVM exits/s | top exits/s | remote TLB flushes/s | MMU invalidations/s | madvise MiB/s |"
           " guest ctxt/s, TLB IPI/s | readyz ok mgmt, work % | busiest guest processes, CPU s |")
     print("|" + "---|" * 14)
     for r in results:
@@ -264,7 +253,7 @@ def main():
               f"| {fmt(r.get('vmm_guest_cores'), 2)}, {fmt(r.get('vmm_kernel_cores'), 2)}, {fmt(r.get('vmm_user_cores'), 2)} "
               f"| {fmt(r.get('vmm_minflt_s'))} | {fmt(r.get('kvm_exits_s'))} "
               f"| {', '.join(f'{k} {v:.0f}' for k, v in list(r.get('exits', {}).items())[:4])} "
-              f"| {fmt(r.get('kvm_remote_tlb_flush_s'))} | {fmt(vcpu_invalidations(r))} "
+              f"| {fmt(r.get('kvm_remote_tlb_flush_s'))} | {invalidations(r)} "
               f"| {', '.join(f'{k} {v:.0f}' for k, v in list(r.get('madvise_mib', {}).items())[:2])} "
               f"| {fmt(r.get('guest_ctxt_s'))}, {fmt(r.get('guest_TLB_s'))} "
               f"| {fmt(r.get('readyz_ok_mgmt_pct'))}, {fmt(r.get('readyz_ok_work_pct'))} "
@@ -285,9 +274,9 @@ def main():
                   f"| {' '.join(s.get('readyz') or [])} |")
 
 
-def vcpu_invalidations(r):
-    rates = [v for k, v in r.get("unmap_hva_range", {}).items() if k.startswith("fc_vcpu")]
-    return sum(rates) if rates else None
+def invalidations(r):
+    rates = r.get("unmap_hva_range", {})
+    return f"{sum(rates.values()):.0f} ({next(iter(rates))})" if rates else ""
 
 
 if __name__ == "__main__":
