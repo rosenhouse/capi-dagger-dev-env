@@ -45,11 +45,47 @@ func TestSnapshotIgnoresLaterHostEdits(t *testing.T) {
 	}
 }
 
-func engineAndModule(t *testing.T) (context.Context, *dagger.Client, string) {
+func TestSecondSessionReusesTheBuild(t *testing.T) {
+	requireEngine(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := build.ModuleRoot(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builtAt := func() string {
+		ctx := context.Background()
+		c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		stamp, err := build.Binaries(c, build.Source(c, root), "cache-test").File("built-at").Contents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stamp
+	}
+
+	first, second := builtAt(), builtAt()
+
+	if first != second {
+		t.Errorf("the second session rebuilt: built at %q, then %q", first, second)
+	}
+}
+
+func requireEngine(t *testing.T) {
 	t.Helper()
 	if os.Getenv("DEVENV_ENGINE_TESTS") == "" {
 		t.Skip("set DEVENV_ENGINE_TESTS to run against a Dagger engine")
 	}
+}
+
+func engineAndModule(t *testing.T) (context.Context, *dagger.Client, string) {
+	t.Helper()
+	requireEngine(t)
 	ctx := context.Background()
 	c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
 	if err != nil {

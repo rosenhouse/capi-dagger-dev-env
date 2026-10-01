@@ -336,7 +336,7 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 		}
 	}
 	refs := map[string]string{}
-	for name, image := range build.Images(c, src, version) {
+	for name, image := range build.Images(c, build.Binaries(c, src, version)) {
 		if refs[name], err = reg.Push(ctx, image, name); err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
 		}
