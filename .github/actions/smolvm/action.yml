@@ -1,5 +1,12 @@
 name: smolvm
-description: Opens /dev/kvm to the runner user and installs smolvm $SMOLVM_VERSION and Go.
+description: Opens /dev/kvm to the runner user and installs smolvm and Go.
+inputs:
+  version:
+    description: smolvm version
+    required: true
+  sha256:
+    description: sha256 of smolvm's linux-x86_64 release archive
+    required: true
 runs:
   using: composite
   steps:
@@ -15,11 +22,14 @@ runs:
     # smolvm expands disk templates beside its binary, so it needs a writable directory.
     - name: Install smolvm
       shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
       run: |
-        curl -fsSLo "$RUNNER_TEMP/smolvm.tar.gz" "https://github.com/smol-machines/smolvm/releases/download/v$SMOLVM_VERSION/smolvm-$SMOLVM_VERSION-linux-x86_64.tar.gz"
-        echo "$SMOLVM_LINUX_X86_64_SHA256  $RUNNER_TEMP/smolvm.tar.gz" | sha256sum -c -
+        curl -fsSLo "$RUNNER_TEMP/smolvm.tar.gz" "https://github.com/smol-machines/smolvm/releases/download/v$VERSION/smolvm-$VERSION-linux-x86_64.tar.gz"
+        echo "$SHA256  $RUNNER_TEMP/smolvm.tar.gz" | sha256sum -c -
         tar -xzf "$RUNNER_TEMP/smolvm.tar.gz" -C "$HOME"
-        echo "$HOME/smolvm-$SMOLVM_VERSION-linux-x86_64" >>"$GITHUB_PATH"
+        echo "$HOME/smolvm-$VERSION-linux-x86_64" >>"$GITHUB_PATH"
     - uses: actions/setup-go@v6
       with:
         go-version-file: go.mod
