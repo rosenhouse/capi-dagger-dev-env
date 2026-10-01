@@ -20,7 +20,7 @@ func TestWaitReturnsOnceCheckPasses(t *testing.T) {
 		return nil
 	}}
 
-	if err := ready.Wait(context.Background(), "management cluster", g); err != nil {
+	if err := ready.Wait(context.Background(), g); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 3 {
@@ -28,14 +28,14 @@ func TestWaitReturnsOnceCheckPasses(t *testing.T) {
 	}
 }
 
-func TestWaitTimeoutNamesStageGateAndLastError(t *testing.T) {
+func TestWaitTimeoutNamesGateAndLastError(t *testing.T) {
 	g := ready.Gate{Name: "nodes ready", Timeout: 20 * time.Millisecond, Interval: time.Millisecond, Check: func(context.Context) error {
 		return errors.New("node mgmt-control-plane NotReady")
 	}}
 
-	err := ready.Wait(context.Background(), "management cluster", g)
+	err := ready.Wait(context.Background(), g)
 
-	for _, want := range []string{"management cluster", "nodes ready", "20ms", "node mgmt-control-plane NotReady"} {
+	for _, want := range []string{"nodes ready", "20ms", "node mgmt-control-plane NotReady"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not mention %q", err, want)
 		}
@@ -49,7 +49,7 @@ func TestWaitStopsWhenContextIsCanceled(t *testing.T) {
 		return errors.New("not yet")
 	}}
 
-	if err := ready.Wait(ctx, "stage", g); !errors.Is(err, context.Canceled) {
+	if err := ready.Wait(ctx, g); !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }

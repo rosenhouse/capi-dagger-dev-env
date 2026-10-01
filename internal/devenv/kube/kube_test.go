@@ -2,7 +2,6 @@ package kube_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,9 +20,9 @@ func TestNodesReadyWhenEveryNodeIsReady(t *testing.T) {
 }
 
 func TestNodesReadyNamesNodesThatAreNotReady(t *testing.T) {
-	cs := fake.NewClientset(node("a", corev1.ConditionTrue), node("b", corev1.ConditionFalse))
+	cs := fake.NewClientset(node("ready-node", corev1.ConditionTrue), node("sick-node", corev1.ConditionFalse))
 	err := kube.NodesReady(context.Background(), cs)
-	if err == nil || !strings.Contains(err.Error(), "b") || strings.Contains(err.Error(), "a,") {
+	if err == nil || err.Error() != "nodes not ready: sick-node" {
 		t.Errorf("err = %v", err)
 	}
 }

@@ -27,7 +27,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go run ./cmd/devenv test
+      - run: go run ./cmd/devenv test --name ci
+      # A second run with the same name checks cleanup, lock release and cache reuse.
+      - run: go run ./cmd/devenv test --name ci
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

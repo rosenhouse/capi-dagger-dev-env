@@ -16,8 +16,8 @@ type Gate struct {
 	Check    func(context.Context) error
 }
 
-// Wait polls the gate until its check passes. On timeout, the error names the stage, the gate, and the last check error.
-func Wait(ctx context.Context, stage string, g Gate) error {
+// Wait polls the gate until its check passes. On timeout, the error names the gate and the last check error.
+func Wait(ctx context.Context, g Gate) error {
 	ctx, cancel := context.WithTimeoutCause(ctx, g.Timeout, errTimeout)
 	defer cancel()
 	for {
@@ -28,7 +28,7 @@ func Wait(ctx context.Context, stage string, g Gate) error {
 		select {
 		case <-ctx.Done():
 			if errors.Is(context.Cause(ctx), errTimeout) {
-				return fmt.Errorf("stage %q: gate %q not met within %v: %w", stage, g.Name, g.Timeout, err)
+				return fmt.Errorf("gate %q not met within %v: %w", g.Name, g.Timeout, err)
 			}
 			return ctx.Err()
 		case <-time.After(g.Interval):

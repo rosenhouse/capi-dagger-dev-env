@@ -14,3 +14,12 @@ func TestRequireCgroupV2(t *testing.T) {
 		t.Errorf("err = %v, want an explanation that cgroup v2 is required", err)
 	}
 }
+
+func TestTailKeepsLastLines(t *testing.T) {
+	if got := tail("a\nb\nc\n", 2); got != "b\nc" {
+		t.Errorf("tail = %q", got)
+	}
+	if got := tail("a\n", 2); got != "a" {
+		t.Errorf("tail = %q", got)
+	}
+}
