@@ -42,6 +42,45 @@ func TestWaitTimeoutNamesGateAndLastError(t *testing.T) {
 	}
 }
 
+func TestWaitTimeoutReportsTheLastAttemptThatFinished(t *testing.T) {
+	calls := 0
+	g := ready.Gate{Name: "manifests applied", Timeout: 50 * time.Millisecond, Interval: time.Millisecond, Check: func(ctx context.Context) error {
+		calls++
+		if calls == 1 {
+			return errors.New("webhook refused the connection")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+
+	err := ready.Wait(context.Background(), g)
+
+	if err == nil || !strings.Contains(err.Error(), "webhook refused the connection") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestWaitLogsFailedChecksAndHowLongTheGateTook(t *testing.T) {
+	var log strings.Builder
+	calls := 0
+	g := ready.Gate{Name: "nodes ready", Timeout: time.Second, Interval: time.Millisecond, Log: &log, Check: func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return errors.New("node a NotReady")
+		}
+		return nil
+	}}
+
+	if err := ready.Wait(context.Background(), g); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(log.String()), "\n")
+	if len(lines) != 2 || lines[0] != `gate "nodes ready": node a NotReady` || !strings.HasPrefix(lines[1], `gate "nodes ready" met after `) {
+		t.Errorf("log = %q", lines)
+	}
+}
+
 func TestWaitStopsWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
