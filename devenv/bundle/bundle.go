@@ -4,7 +4,6 @@ package bundle
 import (
 	"maps"
 	"slices"
-	"strings"
 
 	"dagger.io/dagger"
 	"sigs.k8s.io/yaml"
@@ -60,9 +59,8 @@ func Image(c *dagger.Client, config *dagger.Directory, imagesLock []byte) *dagge
 		WithLabel("dev.carvel.imgpkg.bundle", "true")
 }
 
-// PackageInstall renders a PackageInstall named after the package's short name.
-func PackageInstall(refName, version, namespace, serviceAccount string) ([]byte, error) {
-	name, _, _ := strings.Cut(refName, ".")
+// PackageInstall renders a PackageInstall called name that installs version of the package refName.
+func PackageInstall(name, refName, version, namespace, serviceAccount string) ([]byte, error) {
 	return yaml.Marshal(map[string]any{
 		"apiVersion": "packaging.carvel.dev/v1alpha1",
 		"kind":       "PackageInstall",

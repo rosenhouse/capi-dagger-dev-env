@@ -1,5 +1,5 @@
-// Package e2e exercises a running environment from the host.
-package e2e
+// Package greetinge2e checks, from the host, that the Greeting example works in an environment.
+package greetinge2e
 
 import (
 	"context"
