@@ -98,6 +98,8 @@ resources() { # label machine-to-inspect
 	free -m
 	metric "host memory used, available, swap used ($1)" \
 		"$(free -m | awk '/^Mem:/ { m = $3 " MiB, " $7 " MiB" } /^Swap:/ { s = $3 " MiB" } END { print m ", " s }')"
+	metric "host Shmem, AnonPages, Mapped, Cached, Dirty ($1)" \
+		"$(awk '/^(Shmem|AnonPages|Mapped|Cached|Dirty):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' /proc/meminfo)"
 	for m in $(smolvm machine ls -q); do
 		vmm_memory "$m" "$1"
 		metric "host disk of $m ($1)" "$(du -sm "$(smolvm machine data-dir --name "$m")" | cut -f1) MiB"
@@ -144,6 +146,28 @@ capture() {
 	strip_ansi "$log" | sed -nE 's/.*phase="?([a-z_]+)"? elapsed_ms=([0-9]+).*/\1 \2/p' |
 		while read -r phase ms; do metric "$1 checkpoint: phase $phase" "$ms ms"; done
 	metric "state of $PLAT after capture" "$(state $PLAT)"
+	settle $PLAT "after $1 capture"
+}
+
+# settle <machine> <label>: waits up to 15 min for the guest to be at least 60% idle over 10 s.
+settle() {
+	local t0
+	t0=$(now)
+	if retry 900 idle_at_least 60 "$1"; then
+		metric "$1 at least 60% idle ($2)" "$(since "$t0")"
+	else
+		metric "$1 at least 60% idle ($2)" "not after $(since "$t0")"
+	fi
+}
+
+idle_at_least() { # percent machine
+	local idle
+	idle=$(smolvm machine exec --name "$2" -- sh -c 'head -1 /proc/stat; sleep 10; head -1 /proc/stat' | awk '
+		NR == 1 { for (i = 2; i <= 9; i++) a[i] = $i; next }
+		{ for (i = 2; i <= 9; i++) { d = $i - a[i]; t += d; if (i == 5) idle = d } }
+		END { printf "%d", 100 * idle / t }')
+	echo "$(date +%T) $2 idle $idle%"
+	((idle >= $1))
 }
 
 vmm_rss() { # machine: the VMM's Rss in MiB
@@ -178,6 +202,7 @@ zero_fill() {
 
 zeroed_capture() {
 	zero_fill
+	settle $PLAT "after zero fill"
 	capture zeroed
 }
 
@@ -191,6 +216,9 @@ restore() {
 	echo "$t0" >"$OUT/restore-at"
 	timed "restore: create --from" smolvm machine create --name $SRC --from "$CK/$1.checkpoint"
 	metric "restore: host disk added by create --from" "$(($(df -m --output=used / | tail -1) - used)) MiB"
+	metric "restore: largest files under \$HOME (allocated MiB)" \
+		"$(find "$HOME" -xdev -type f -size +256M -printf '%b %p\n' 2>/dev/null | sort -rn | head -8 |
+			awk -v h="$HOME/" '{ sub(h, "", $2); printf "%s%s %d", sep, $2, $1 / 2048; sep = ", " }')"
 	timed "restore: start" smolvm machine start --name $SRC
 	h1=$(now)
 	u1=$(uptime_of $SRC)
@@ -440,7 +468,7 @@ capture) guest $PLAT churn "before capture" && capture plain ;;
 zeroed-capture) zeroed_capture ;;
 restore) restore "$2" ;;
 env) env_up "$2" ;;
-recheck) gates "$2" "$3" ;;
+recheck) gates "$2" "$3" && guest "$2" churn "$2 $3" ;;
 access) access "$2" "$3" "$4" ;;
 soak) soak ;;
 after-soak) after_soak ;;

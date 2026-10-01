@@ -252,11 +252,12 @@ churn() { # label
 		[ $c = mgmt ] || kc=/root/work.kubeconfig
 		metric "$c: container restarts, lease transitions, NodeNotReady events, LeaderElection events ($1)" \
 			"$(restarts --kubeconfig $kc), $(lease_transitions $kc), $(events $kc NodeNotReady), $(events $kc LeaderElection)"
+		metric "$c: pods that restarted ($1)" "$(kubectl --kubeconfig $kc get pods -A --no-headers |
+			awk '$5 > 0 { printf "%s%s %d", sep, $2, $5; sep = ", " }')"
+		metric "$c: Warning events by reason ($1)" "$(kubectl --kubeconfig $kc get events -A --field-selector type=Warning \
+			--no-headers -o custom-columns=:.reason | sort | uniq -c | sort -rn | awk '{ printf "%s%s %d", sep, $2, $1; sep = ", " }')"
 	done
-	metric "mgmt kube-apiserver restarts ($1)" \
-		"$(kubectl -n kube-system get pod kube-apiserver-mgmt-control-plane -o jsonpath='{.status.containerStatuses[0].restartCount}')"
 	metric "Machines ($1)" "$(kubectl -n default get machines --no-headers -o custom-columns=:.metadata.name,:.status.phase | tr -s ' \n' ' ')"
-	metric "MachineHealthCheck events ($1)" "$(kubectl get events -A --no-headers | grep -ciE 'unhealthy|remediat')"
 }
 
 lease_transitions() { # kubeconfig
