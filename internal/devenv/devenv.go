@@ -98,10 +98,7 @@ func (e *Environment) bringUp(ctx context.Context) error {
 		return err
 	}
 	if err := e.stage("registry and mirrors", func() (err error) {
-		if e.registry, err = infra.StartRegistry(ctx, c); err != nil {
-			return err
-		}
-		e.mirrors, err = infra.StartMirrors(ctx, c)
+		e.registry, e.mirrors, err = infra.StartRegistries(ctx, c)
 		return err
 	}); err != nil {
 		return err
@@ -358,13 +355,13 @@ func (e *Environment) Verify(ctx context.Context) error {
 		return err
 	}
 	catalogs := map[string]string{}
-	for name, host := range e.mirrors {
-		if catalogs[name], err = e.registry.Catalog(ctx, host); err != nil {
+	for name, mirror := range e.mirrors {
+		if catalogs[name], err = mirror.Catalog(ctx); err != nil {
 			return err
 		}
 	}
 	return errors.Join(
-		unusedMirrors(catalogs),
+		missingMirroredRepos(catalogs, mirroredRepos),
 		kube.NodesReady(ctx, cs),
 		kube.NodesReady(ctx, workload),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
@@ -373,16 +370,29 @@ func (e *Environment) Verify(ctx context.Context) error {
 	)
 }
 
-// unusedMirrors names the mirrors whose catalogs are empty.
-func unusedMirrors(catalogs map[string]string) error {
-	var unused []string
-	for _, name := range slices.Sorted(maps.Keys(catalogs)) {
-		if strings.TrimSpace(catalogs[name]) == "" {
-			unused = append(unused, name)
+// mirroredRepos are repositories that bring-up pulls through each mirror. kindest/node arrives only
+// through the Docker daemon's mirror; the others through containerd in the nodes.
+var mirroredRepos = map[string][]string{
+	"docker.io":       {"kindest/node", "kindest/kindnetd"},
+	"registry.k8s.io": {"cluster-api/cluster-api-controller"},
+	"ghcr.io":         {"carvel-dev/kapp-controller"},
+	"quay.io":         {"jetstack/cert-manager-controller"},
+	"gcr.io":          {"k8s-staging-cluster-api/capd-manager"},
+}
+
+// missingMirroredRepos names the repositories in want that the mirrors' catalogs lack.
+func missingMirroredRepos(catalogs map[string]string, want map[string][]string) error {
+	var missing []string
+	for _, mirror := range slices.Sorted(maps.Keys(want)) {
+		repos := strings.Fields(catalogs[mirror])
+		for _, repo := range want[mirror] {
+			if !slices.Contains(repos, repo) {
+				missing = append(missing, mirror+"/"+repo)
+			}
 		}
 	}
-	if len(unused) > 0 {
-		return fmt.Errorf("mirrors served nothing: %s", strings.Join(unused, ", "))
+	if len(missing) > 0 {
+		return fmt.Errorf("mirrors lack repositories: %s", strings.Join(missing, ", "))
 	}
 	return nil
 }
