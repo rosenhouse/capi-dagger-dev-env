@@ -177,9 +177,17 @@ const (
 	remotePackageInstall = WorkloadCluster + "-greeting-controller"
 )
 
+// Machines lists smolvm's machines once it has checked smolvm's version.
+func Machines(ctx context.Context, o Options) ([]smolvm.Machine, error) {
+	if err := o.SmolVM.CheckVersion(ctx); err != nil {
+		return nil, err
+	}
+	return o.SmolVM.List(ctx)
+}
+
 // Open holds the environment called o.Name, or the only running one. Its VM must be running.
 func Open(ctx context.Context, o Options) (*Environment, error) {
-	machines, err := o.SmolVM.List(ctx)
+	machines, err := Machines(ctx, o)
 	if err != nil {
 		return nil, err
 	}

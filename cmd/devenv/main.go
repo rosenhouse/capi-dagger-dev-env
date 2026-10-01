@@ -86,7 +86,7 @@ func main() {
 		Short: "List environments with the state of their VMs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			machines, err := o.SmolVM.List(cmd.Context())
+			machines, err := devenv.Machines(cmd.Context(), o)
 			if err != nil {
 				return err
 			}
@@ -115,7 +115,7 @@ func main() {
 		Short: "Print the kubeconfig of a running environment",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			machines, err := o.SmolVM.List(cmd.Context())
+			machines, err := devenv.Machines(cmd.Context(), o)
 			if err != nil {
 				return err
 			}

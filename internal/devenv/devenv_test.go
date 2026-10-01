@@ -19,7 +19,7 @@ import (
 )
 
 // TestMain lets the test binary stand in for smolvm: with FAKE_SMOLVM_CALLS set, it appends its arguments
-// there, prints FAKE_SMOLVM_LS for "machine ls --json", and prints smolvm's version for "--version".
+// there, prints FAKE_SMOLVM_LS for "machine ls --json", and prints FAKE_SMOLVM_VERSION for "--version".
 func TestMain(m *testing.M) {
 	if calls := os.Getenv("FAKE_SMOLVM_CALLS"); calls != "" {
 		f, err := os.OpenFile(calls, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 		f.Close()
 		switch strings.Join(os.Args[1:], " ") {
 		case "--version":
-			fmt.Println("smolvm " + smolvm.Version)
+			fmt.Println(os.Getenv("FAKE_SMOLVM_VERSION"))
 		case "machine ls --json":
 			fmt.Println(os.Getenv("FAKE_SMOLVM_LS"))
 		}
@@ -54,6 +54,7 @@ func fakeSmolvm(t *testing.T, machines func(state.Env) []smolvm.Machine) (Option
 	calls := filepath.Join(t.TempDir(), "calls")
 	t.Setenv("FAKE_SMOLVM_CALLS", calls)
 	t.Setenv("FAKE_SMOLVM_LS", lsJSON(machines(env)))
+	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm "+smolvm.Version)
 	return o, env, func() []string {
 		data, err := os.ReadFile(calls)
 		if err != nil {
@@ -186,6 +187,23 @@ func TestDownPurgesTheStateOfAnEnvironmentWithoutAVM(t *testing.T) {
 	}
 	if want := "Environment alpha has no VM.\nDeleted " + env.Dir + ".\n"; out.String() != want {
 		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+}
+
+func TestDownChecksSmolvmsVersion(t *testing.T) {
+	o, env, calls := fakeSmolvm(t, vm(smolvm.Running))
+	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm 1.21.0")
+
+	err := Down(t.Context(), o, true, &bytes.Buffer{})
+
+	if err == nil || !strings.Contains(err.Error(), "want smolvm "+smolvm.Version) {
+		t.Errorf("err = %v", err)
+	}
+	if got := calls(); !slices.Equal(got, []string{"--version"}) {
+		t.Errorf("smolvm calls = %q", got)
+	}
+	if _, err := os.Stat(env.Dir); err != nil {
+		t.Errorf("state dir: %v", err)
 	}
 }
 
