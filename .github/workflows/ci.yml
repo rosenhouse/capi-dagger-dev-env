@@ -98,9 +98,14 @@ jobs:
           say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
           say "### Two environments at once"
           say "Before: $(free -m | awk '/^Mem:/ { print $3 }') MiB of memory and $(df --output=used -BG / | tail -1 | tr -d ' ') of disk used."
+          vms_rss() {
+            for pid in $(smolvm machine ls --json | jq -r '.[].pid // empty'); do
+              sudo awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null
+            done | awk '{ s += $1 } END { print int(s / 1024) }'
+          }
           # Each sample: host memory used and the VMs' RSS in MiB, and disk used in GB.
           (while sleep 5; do
-            echo "$(free -m | awk '/^Mem:/ { print $3 }') $(ps -C smolvm-bin -o rss= | awk '{ s += $1 } END { print int(s / 1024) }') $(df --output=used -BG / | tail -1 | tr -d ' G')"
+            echo "$(free -m | awk '/^Mem:/ { print $3 }') $(vms_rss) $(df --output=used -BG / | tail -1 | tr -d ' G')"
           done >"$RUNNER_TEMP/usage.log") &
           "$RUNNER_TEMP/devenv" test --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
           "$RUNNER_TEMP/devenv" test 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
