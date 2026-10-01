@@ -19,6 +19,7 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/oci"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
 // firstParty pushes the first-party images and bundles, installs the management packages,
@@ -69,7 +70,13 @@ type artifacts struct {
 }
 
 // build builds images from the current source, stamped with version, or with a digest of the source if version is empty.
+// It waits while another environment builds, whose results Go's build cache then mostly holds.
 func (e *Environment) build(ctx context.Context, version string) (artifacts, error) {
+	unlock, err := state.WaitLock(ctx, filepath.Join(e.opts.CacheDir, "build.lock"))
+	if err != nil {
+		return artifacts{}, err
+	}
+	defer unlock()
 	out, err := os.MkdirTemp("", "devenv-build-")
 	if err != nil {
 		return artifacts{}, err

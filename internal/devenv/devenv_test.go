@@ -461,6 +461,22 @@ func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
 	}
 }
 
+func TestBuildWaitsWhileAnotherEnvironmentBuilds(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	e := f.open(t)
+	unlock, err := state.WaitLock(t.Context(), filepath.Join(f.o.CacheDir, "build.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	if _, err := e.build(ctx, ""); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Stopped))
 	env := f.env
