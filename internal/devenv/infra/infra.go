@@ -13,9 +13,7 @@ import (
 const (
 	KindVersion       = "v0.33.0"
 	KubernetesVersion = "v1.37.0"
-
-	// MgmtAPIPort is where the DinD service publishes the management API server.
-	MgmtAPIPort = 6443
+	MgmtAPIPort       = 6443
 
 	// Digests avoid a registry round trip, and its rate limit, when the image is cached.
 	dindImage      = "docker:29-dind@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0"
@@ -23,12 +21,17 @@ const (
 	kindNodeImage  = "kindest/node:" + KubernetesVersion + "@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
 )
 
-const mgmtKindConfig = `kind: Cluster
+var kindChecksums = map[string]string{
+	"amd64": "sha256:aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d",
+	"arm64": "sha256:20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2",
+}
+
+var mgmtKindConfig = fmt.Sprintf(`kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
   apiServerAddress: "0.0.0.0"
-  apiServerPort: 6443
-`
+  apiServerPort: %d
+`, MgmtAPIPort)
 
 // Infra holds the long-lived services of one environment's Dagger session.
 type Infra struct {
@@ -37,46 +40,13 @@ type Infra struct {
 	tools *dagger.Container
 }
 
-// Start starts the environment's Docker daemon and removes containers left by an earlier session.
-func Start(ctx context.Context, c *dagger.Client, env string) (*Infra, error) {
-	platform, err := c.DefaultPlatform(ctx)
+// Preflight fails if the engine's host cannot run Kind.
+func Preflight(ctx context.Context, c *dagger.Client) error {
+	magic, err := c.Container().From(dindImage).WithExec([]string{"stat", "-fc", "%t", "/sys/fs/cgroup"}).Stdout(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	arch := strings.TrimPrefix(string(platform), "linux/")
-
-	dind, err := c.Container().From(dindImage).
-		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
-		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+env+"-docker"),
-			dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeLocked}).
-		WithExposedPort(2375).
-		AsService(dagger.ContainerAsServiceOpts{UseEntrypoint: true, InsecureRootCapabilities: true, Args: []string{"--tls=false"}}).
-		Start(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("start Docker daemon: %w", err)
-	}
-
-	i := &Infra{
-		c:    c,
-		dind: dind,
-		tools: c.Container().From(dockerCLIImage).
-			WithFile("/usr/local/bin/kind",
-				c.HTTP("https://github.com/kubernetes-sigs/kind/releases/download/"+KindVersion+"/kind-linux-"+arch),
-				dagger.ContainerWithFileOpts{Permissions: 0o755}).
-			WithServiceBinding("docker", dind).
-			WithEnvVariable("DOCKER_HOST", "tcp://docker:2375").
-			// Each session acts on a fresh daemon, so its execs must not reuse cached results.
-			WithEnvVariable("DEVENV_SESSION", time.Now().Format(time.RFC3339Nano)),
-	}
-	magic, err := i.run(ctx, "stat -fc %t /sys/fs/cgroup")
-	if err != nil {
-		return nil, err
-	}
-	if err := requireCgroupV2(magic); err != nil {
-		return nil, err
-	}
-	_, err = i.run(ctx, `docker rm -f $(docker ps -aq) 2>/dev/null; docker network prune -f`)
-	return i, err
+	return requireCgroupV2(magic)
 }
 
 // requireCgroupV2 checks the filesystem magic number of /sys/fs/cgroup, which BusyBox and GNU stat both print.
@@ -85,6 +55,41 @@ func requireCgroupV2(magic string) error {
 		return fmt.Errorf("the Dagger engine's host does not mount cgroup2 at /sys/fs/cgroup (filesystem magic 0x%s); Kind inside Dagger needs cgroup v2", magic)
 	}
 	return nil
+}
+
+// Start starts the environment's Docker daemon and removes containers and volumes left by an earlier session.
+func Start(ctx context.Context, c *dagger.Client, envID string) (*Infra, error) {
+	platform, err := c.DefaultPlatform(ctx)
+	if err != nil {
+		return nil, err
+	}
+	arch := strings.TrimPrefix(string(platform), "linux/")
+
+	dind, err := c.Container().From(dindImage).
+		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
+		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+envID+"-docker"),
+			dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeLocked}).
+		WithExposedPort(2375).
+		AsService(dagger.ContainerAsServiceOpts{UseEntrypoint: true, InsecureRootCapabilities: true, Args: []string{"--tls=false"}}).
+		Start(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	kind := c.HTTP("https://github.com/kubernetes-sigs/kind/releases/download/"+KindVersion+"/kind-linux-"+arch,
+		dagger.HTTPOpts{Checksum: kindChecksums[arch]})
+	i := &Infra{
+		c:    c,
+		dind: dind,
+		tools: c.Container().From(dockerCLIImage).
+			WithFile("/usr/local/bin/kind", kind, dagger.ContainerWithFileOpts{Permissions: 0o755}).
+			WithServiceBinding("docker", dind).
+			WithEnvVariable("DOCKER_HOST", "tcp://docker:2375").
+			// Each session acts on a fresh daemon, so its execs must not reuse cached results.
+			WithEnvVariable("DEVENV_SESSION", time.Now().Format(time.RFC3339Nano)),
+	}
+	_, err = i.run(ctx, `docker rm -fv $(docker ps -aq) 2>/dev/null; docker network prune -f && docker volume prune -af`)
+	return i, err
 }
 
 // CreateManagementCluster creates the Kind management cluster and returns its kubeconfig.

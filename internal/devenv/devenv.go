@@ -3,6 +3,7 @@ package devenv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,6 @@ type Environment struct {
 
 	opts    Options
 	start   time.Time
-	logPath string
 	infra   *infra.Infra
 	closers []func() error
 }
@@ -44,7 +44,11 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &Environment{Env: env, opts: o, start: time.Now(), logPath: filepath.Join(env.Dir, "dagger.log")}
+	unlock, err := env.Lock()
+	if err != nil {
+		return nil, err
+	}
+	e := &Environment{Env: env, opts: o, start: time.Now(), closers: []func() error{func() error { unlock(); return nil }}}
 	if err := e.bringUp(ctx); err != nil {
 		e.exportKindLogs()
 		e.Close()
@@ -54,58 +58,86 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 }
 
 func (e *Environment) bringUp(ctx context.Context) error {
-	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
-		return err
-	}
-	logFile, err := os.Create(e.logPath)
+	logPath := filepath.Join(e.Dir, "dagger.log")
+	logFile, err := os.Create(logPath)
 	if err != nil {
 		return err
 	}
-	e.closers = append(e.closers, logFile.Close)
+	e.closers = append([]func() error{logFile.Close}, e.closers...)
 	var logs io.Writer = logFile
 	if e.opts.Verbose {
 		logs = io.MultiWriter(logFile, os.Stderr)
 	}
 
-	e.progress("connecting to Dagger engine")
-	c, err := dagger.Connect(ctx, dagger.WithLogOutput(logs), dagger.WithEnvironmentVariable("DAGGER_PROGRESS", "plain"))
-	if err != nil {
-		return fmt.Errorf("stage %q: %w", "connect", err)
+	var c *dagger.Client
+	if err := e.stage("connect to Dagger engine, logging to "+logPath, func() (err error) {
+		c, err = dagger.Connect(ctx, dagger.WithLogOutput(logs),
+			dagger.WithEnvironmentVariable("DAGGER_PROGRESS", "plain"),
+			dagger.WithEnvironmentVariable("NO_COLOR", "1"))
+		return err
+	}); err != nil {
+		return err
 	}
 	e.closers = append([]func() error{c.Close}, e.closers...)
 
-	e.progress("starting Docker daemon")
-	if e.infra, err = infra.Start(ctx, c, e.Name); err != nil {
-		return fmt.Errorf("stage %q: %w", "docker daemon", err)
-	}
-
-	e.progress("creating management cluster")
-	kubeconfig, err := e.infra.CreateManagementCluster(ctx)
-	if err != nil {
-		return fmt.Errorf("stage %q: %w", "management cluster", err)
-	}
-	port, err := e.infra.Tunnel(ctx, infra.MgmtAPIPort)
-	if err != nil {
-		return fmt.Errorf("stage %q: tunnel: %w", "management cluster", err)
-	}
-	if e.MgmtKubeconfig, err = e.WriteKubeconfig("mgmt", kubeconfig, port); err != nil {
+	if err := e.stage("preflight", func() error { return infra.Preflight(ctx, c) }); err != nil {
 		return err
 	}
+	if err := e.stage("docker daemon", func() (err error) {
+		e.infra, err = infra.Start(ctx, c, e.ID)
+		return err
+	}); err != nil {
+		return err
+	}
+	return e.stage("management cluster", func() error {
+		kubeconfig, err := e.infra.CreateManagementCluster(ctx)
+		if err != nil {
+			return err
+		}
+		port, err := e.infra.Tunnel(ctx, infra.MgmtAPIPort)
+		if err != nil {
+			return err
+		}
+		if e.MgmtKubeconfig, err = e.WriteKubeconfig("mgmt", kubeconfig, port); err != nil {
+			return err
+		}
+		cs, err := kube.Client(e.MgmtKubeconfig)
+		if err != nil {
+			return err
+		}
+		return ready.Wait(ctx, ready.Gate{
+			Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second,
+			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
+		})
+	})
+}
+
+// Verify checks the environment from the host through its kubeconfigs.
+func (e *Environment) Verify(ctx context.Context) error {
 	cs, err := kube.Client(e.MgmtKubeconfig)
 	if err != nil {
 		return err
 	}
-	return ready.Wait(ctx, "management cluster", ready.Gate{
-		Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second,
-		Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
-	})
+	return kube.NodesReady(ctx, cs)
 }
 
 // Close ends the Dagger session, which stops every service in the environment.
-func (e *Environment) Close() {
-	for _, close := range e.closers {
-		_ = close()
+func (e *Environment) Close() error {
+	e.progress("tearing down")
+	var errs []error
+	for _, closer := range e.closers {
+		errs = append(errs, closer())
 	}
+	return errors.Join(errs...)
+}
+
+// stage reports the start of a stage and names it in any error.
+func (e *Environment) stage(name string, run func() error) error {
+	e.progress(name)
+	if err := run(); err != nil {
+		return fmt.Errorf("stage %q: %w", name, err)
+	}
+	return nil
 }
 
 func (e *Environment) exportKindLogs() {
