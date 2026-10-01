@@ -57,7 +57,7 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	}
 	e := &Environment{Env: env, opts: o, start: time.Now(), closers: []func() error{func() error { unlock(); return nil }}}
 	if err := e.bringUp(ctx); err != nil {
-		e.exportKindLogs()
+		e.ExportLogs()
 		e.Close()
 		return nil, fmt.Errorf("%w\nlogs: %s", err, env.Dir)
 	}
@@ -114,6 +114,8 @@ func (e *Environment) bringUp(ctx context.Context) error {
 const (
 	workloadCluster   = "work"
 	workloadNamespace = "default"
+	// remotePackageInstall is the name addon-manager gives greeting-controller's PackageInstall.
+	remotePackageInstall = workloadCluster + "-greeting-controller"
 )
 
 // workloadCluster creates the workload cluster and waits for addon-manager to install greeting-controller into it.
@@ -135,7 +137,9 @@ func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) err
 	}
 	return ready.Wait(ctx, ready.Gate{
 		Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
-		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, workloadNamespace) },
+		Check: func(ctx context.Context) error {
+			return kube.PackageInstallReconciled(ctx, dyn, workloadNamespace, remotePackageInstall)
+		},
 	})
 }
 
@@ -310,7 +314,7 @@ func (e *Environment) Verify(ctx context.Context) error {
 		kube.NodesReady(ctx, cs),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
 		kube.ClusterAvailable(ctx, dyn, workloadNamespace, workloadCluster),
-		kube.PackageInstallsReconciled(ctx, dyn, workloadNamespace),
+		kube.PackageInstallReconciled(ctx, dyn, workloadNamespace, remotePackageInstall),
 	)
 }
 
@@ -333,13 +337,14 @@ func (e *Environment) stage(name string, run func() error) error {
 	return nil
 }
 
-func (e *Environment) exportKindLogs() {
+// ExportLogs writes cluster logs and resources to the environment directory, as far as bring-up got.
+func (e *Environment) ExportLogs() {
 	if e.infra == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	_ = e.infra.ExportLogs(ctx, filepath.Join(e.Dir, "kind-logs"))
+	_ = e.infra.ExportLogs(ctx, filepath.Join(e.Dir, "logs"))
 }
 
 func (e *Environment) progress(msg string) {

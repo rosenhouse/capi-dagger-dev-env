@@ -159,9 +159,12 @@ func (i *Infra) Tunnel(ctx context.Context, port int) (int, error) {
 	return ports[0].Port(ctx)
 }
 
-// ExportLogs writes Kind's cluster logs to dir on the host.
+// ExportLogs writes logs of every Kind and CAPD cluster, and the CAPI and package resources, to dir on the host.
 func (i *Infra) ExportLogs(ctx context.Context, dir string) error {
-	logs := i.tools.WithExec([]string{"sh", "-c", "kind export logs /logs --name mgmt || true"}).Directory("/logs")
+	logs := i.tools.With(InSession).WithExec([]string{"sh", "-c", `mkdir -p /logs
+for cluster in $(kind get clusters); do kind export logs /logs/$cluster --name $cluster; done
+kubectl get clusters,machines,packageinstalls,apps -A -o yaml > /logs/resources.yaml
+true`}).Directory("/logs")
 	_, err := logs.Export(ctx, dir)
 	return err
 }

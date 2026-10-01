@@ -45,6 +45,10 @@ func main() {
 				return err
 			}
 			verifyErr := env.Verify(cmd.Context())
+			if verifyErr != nil {
+				env.ExportLogs()
+				verifyErr = fmt.Errorf("verify: %w\nlogs: %s", verifyErr, env.Dir)
+			}
 			if err := errors.Join(verifyErr, env.Close()); err != nil {
 				return err
 			}
