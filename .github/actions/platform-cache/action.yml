@@ -3,13 +3,19 @@ description: >
   Builds devenv to $RUNNER_TEMP/devenv, and restores this runner's platform checkpoint from the cache.
   It writes the CPU, the checkpoint's key and how the restore went to $RUNNER_TEMP/platform.md.
 inputs:
+  lookup-only:
+    description: Only check whether the cache holds the checkpoint.
+    default: "false"
   save-on-miss:
-    description: On a miss, save a checkpoint in this job, without publishing it.
+    description: On a miss, save a checkpoint in this job. Publishing it is up to the job.
     default: "false"
 outputs:
+  key:
+    description: The cache key of this runner's checkpoint
+    value: devenv-platform-${{ steps.key.outputs.key }}
   hit:
-    description: Whether the cache held this runner's checkpoint
-    value: ${{ steps.restore.outputs.cache-hit == 'true' }}
+    description: Whether the cache holds this runner's checkpoint
+    value: ${{ steps.restore.outputs.cache-hit }}
 runs:
   using: composite
   steps:
@@ -29,16 +35,20 @@ runs:
       with:
         path: ~/.cache/devenv/platform
         key: devenv-platform-${{ steps.key.outputs.key }}
+        lookup-only: ${{ inputs.lookup-only }}
     - name: Record the restore
       shell: bash
       env:
         HIT: ${{ steps.restore.outputs.cache-hit }}
+        LOOKUP_ONLY: ${{ inputs.lookup-only }}
       run: |
         seconds=$(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $(cat "$RUNNER_TEMP/restore.start") }")
-        if [ "$HIT" = true ]; then
-          echo "| Platform cache | hit: restored $(du -sm ~/.cache/devenv/platform | cut -f1) MiB in $seconds s |" >>"$RUNNER_TEMP/platform.md"
-        else
+        if [ "$HIT" != true ]; then
           echo "| Platform cache | miss after $seconds s |" >>"$RUNNER_TEMP/platform.md"
+        elif [ "$LOOKUP_ONLY" = true ]; then
+          echo "| Platform cache | hit |" >>"$RUNNER_TEMP/platform.md"
+        else
+          echo "| Platform cache | hit: restored $(du -sm ~/.cache/devenv/platform | cut -f1) MiB in $seconds s |" >>"$RUNNER_TEMP/platform.md"
         fi
     # On a miss, a job that saves its own checkpoint measures a cold start followed by warm ones.
     - name: devenv platform save

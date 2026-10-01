@@ -338,7 +338,7 @@ func (v *VM) Kubeconfigs(ctx context.Context) (mgmt, workload []byte, err error)
 
 // Scripts are what the VM's methods run in the guest to set up the platform, for a workload cluster called cluster in namespace.
 func Scripts(cluster, namespace string) []string {
-	return []string{installScript, dockerSetupScript, dockerdScript, registryScript, pullScript(images, 0, 0), mgmtClusterScript, forwardScript(cluster, namespace)}
+	return []string{installScript, dockerSetupScript, dockerdScript, registryScript, mgmtClusterScript, forwardScript(cluster, namespace)}
 }
 
 // Images are the images that the guest pulls.

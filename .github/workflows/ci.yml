@@ -56,7 +56,8 @@ jobs:
           path: ${{ runner.temp }}/smolvm-logs
   # Only post-merge CI publishes checkpoints. Runners land on random CPUs, so three jobs warm several contracts.
   platform:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/smol'
+    # TEMPORARY: also on pull requests, which do not publish, to try this job before it runs on smol.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/smol') || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -69,41 +70,21 @@ jobs:
         with:
           version: ${{ env.SMOLVM_VERSION }}
           sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
-      - name: Platform key
-        id: key
-        run: |
-          go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
-          key=$("$RUNNER_TEMP/devenv" platform key)
-          echo "key=$key" >>"$GITHUB_OUTPUT"
-          printf '| Runner | |\n| --- | --- |\n| Platform key | %s |\n' "$key" >"$RUNNER_TEMP/platform.md"
-          echo "| CPU | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs) |" >>"$RUNNER_TEMP/platform.md"
-          echo "| CPU contract | $("$RUNNER_TEMP/devenv" platform key --inputs | jq -r .contract) |" >>"$RUNNER_TEMP/platform.md"
-      - uses: actions/cache/restore@v4
-        id: lookup
+      - uses: ./.github/actions/platform-cache
+        id: cache
         with:
-          path: ~/.cache/devenv/platform
-          key: devenv-platform-${{ steps.key.outputs.key }}
           lookup-only: true
-      - name: devenv platform save
-        if: steps.lookup.outputs.cache-hit != 'true'
-        timeout-minutes: 20
-        run: |
-          start=$EPOCHREALTIME
-          "$RUNNER_TEMP/devenv" platform save 2>&1 | tee "$RUNNER_TEMP/save.log"
-          echo "| Platform cache | miss |" >>"$RUNNER_TEMP/platform.md"
-          echo "| Saved | $(du -sm ~/.cache/devenv/platform/*.checkpoint | cut -f1) MiB in $(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $start }") s |" >>"$RUNNER_TEMP/platform.md"
-          echo "$EPOCHREALTIME" >"$RUNNER_TEMP/cache-save.start"
-      - if: steps.lookup.outputs.cache-hit != 'true'
+          save-on-miss: true
+      - if: steps.cache.outputs.hit != 'true'
+        run: echo "$EPOCHREALTIME" >"$RUNNER_TEMP/cache-save.start"
+      - if: steps.cache.outputs.hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/devenv/platform
-          key: devenv-platform-${{ steps.key.outputs.key }}
+          key: ${{ steps.cache.outputs.key }}
       - name: Summary
         if: always()
-        env:
-          HIT: ${{ steps.lookup.outputs.cache-hit }}
         run: |
-          if [ "$HIT" = true ]; then echo "| Platform cache | hit |" >>"$RUNNER_TEMP/platform.md"; fi
           if [ -f "$RUNNER_TEMP/cache-save.start" ]; then
             echo "| Cache save | $(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $(cat "$RUNNER_TEMP/cache-save.start") }") s |" >>"$RUNNER_TEMP/platform.md"
           fi
