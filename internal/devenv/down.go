@@ -20,7 +20,7 @@ func Down(ctx context.Context, o Options, purge bool, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	e, err := open(env, o, false)
+	e, err := open(env, o)
 	if err != nil {
 		return err
 	}

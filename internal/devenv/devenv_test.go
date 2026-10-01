@@ -98,6 +98,9 @@ func TestUpRefusesAnEnvironmentWhoseVMIsRunning(t *testing.T) {
 	t.Cleanup(func() { kvmDevice = "/dev/kvm" })
 	o, env, calls := fakeSmolvm(t, vm(smolvm.Running))
 	writeKubeconfigs(t, env)
+	if err := os.WriteFile(filepath.Join(env.Dir, "guest.log"), []byte("kind create cluster\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := Up(t.Context(), o)
 
@@ -109,6 +112,9 @@ func TestUpRefusesAnEnvironmentWhoseVMIsRunning(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(env.Dir, "mgmt.kubeconfig")); err != nil {
 		t.Errorf("kubeconfig of the running environment: %v", err)
+	}
+	if log, err := os.ReadFile(filepath.Join(env.Dir, "guest.log")); err != nil || string(log) != "kind create cluster\n" {
+		t.Errorf("guest.log of the running environment = %q, %v", log, err)
 	}
 }
 
