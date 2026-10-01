@@ -34,12 +34,22 @@ func Base(ctx context.Context, ref string, platform v1.Platform, cacheDir string
 		return nil, err
 	}
 	dir := filepath.Join(cacheDir, strings.NewReplacer(":", "-", "/", "-").Replace(d.DigestStr()+"-"+platform.String()))
-	if img, err := cached(dir); err == nil {
+	if img, err := cached(dir); !errors.Is(err, fs.ErrNotExist) {
+		if err != nil {
+			return nil, fmt.Errorf("cached base %s: %w", dir, err)
+		}
 		return img, nil
 	}
 	img, err := remote.Image(d, remote.WithContext(ctx), remote.WithPlatform(platform))
 	if err != nil {
 		return nil, err
+	}
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		return nil, err
+	}
+	if got := cfg.Platform(); got == nil || !got.Satisfies(platform) {
+		return nil, fmt.Errorf("%s is for %v, not %s", ref, got, platform)
 	}
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, err
@@ -77,13 +87,13 @@ func cached(dir string) (v1.Image, error) {
 		return nil, err
 	}
 	if len(m.Manifests) != 1 {
-		return nil, fmt.Errorf("%s holds %d images, want 1", dir, len(m.Manifests))
+		return nil, fmt.Errorf("holds %d images, want 1", len(m.Manifests))
 	}
 	return p.Image(m.Manifests[0].Digest)
 }
 
-// Image adds binary to base as /<name> and makes it the entrypoint.
-func Image(base v1.Image, name string, binary []byte) (v1.Image, error) {
+// Image adds binary to base as /<command> and makes it the entrypoint.
+func Image(base v1.Image, command string, binary []byte) (v1.Image, error) {
 	mt, err := base.MediaType()
 	if err != nil {
 		return nil, err
@@ -92,7 +102,7 @@ func Image(base v1.Image, name string, binary []byte) (v1.Image, error) {
 	if mt == types.OCIManifestSchema1 {
 		layerType = types.OCILayer
 	}
-	l, err := layer([]file{{name, binary, 0o755}}, layerType)
+	l, err := layer([]file{{command, binary, 0o755}}, layerType)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +115,7 @@ func Image(base v1.Image, name string, binary []byte) (v1.Image, error) {
 		return nil, err
 	}
 	c := cfg.Config
-	c.Entrypoint, c.Cmd = []string{"/" + name}, nil
+	c.Entrypoint, c.Cmd = []string{"/" + command}, nil
 	return mutate.Config(img, c)
 }
 
