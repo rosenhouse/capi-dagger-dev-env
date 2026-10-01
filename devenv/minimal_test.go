@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/bundle"
@@ -50,7 +51,7 @@ func TestMinimalConsumer(t *testing.T) {
 	c.Ready = func(context.Context, *Environment) error { ready = true; return nil }
 	ctx := context.Background()
 
-	e, err := Up(ctx, c, Options{Name: "minimal-" + rand.Text()[:6], StateDir: ".devenv", Progress: os.Stderr})
+	e, err := Up(ctx, c, Options{Name: "minimal-" + strings.ToLower(rand.Text()[:6]), StateDir: ".devenv", Progress: os.Stderr})
 	if err != nil {
 		t.Fatal(err)
 	}
