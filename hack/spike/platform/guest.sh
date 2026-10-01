@@ -270,9 +270,9 @@ events() { # kubeconfig reason
 	kubectl --kubeconfig "$1" get events -A --field-selector reason="$2" --no-headers 2>/dev/null | wc -l
 }
 
-oom_lines() {
-	n=$(dmesg | grep -ciE 'out of memory|oom-kill|killed process' || true)
-	metric "guest kernel OOM lines ($(hostname))" "$n"
+oom_lines() { # uptime: counts kernel OOM lines logged after this many seconds of uptime
+	n=$(dmesg | awk -v t="$1" -F'[][]' '$2 + 0 >= t && tolower($0) ~ /out of memory|oom-kill|killed process/' | wc -l)
+	metric "guest kernel OOM lines since restore ($(hostname))" "$n"
 	[ "$n" = 0 ]
 }
 
@@ -344,7 +344,7 @@ forward) forward ;;
 resources) resources "$2" ;;
 pre-capture) pre_capture ;;
 churn) churn "$2" ;;
-oom-lines) oom_lines ;;
+oom-lines) oom_lines "$2" ;;
 cpu-probe) cpu_probe "$2" ;;
 diag) diag ;;
 *) echo "unknown stage $1" >&2; exit 2 ;;

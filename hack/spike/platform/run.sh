@@ -31,6 +31,16 @@ timed() { # name command...
 	metric "$name" "$(since "$t0")"
 }
 
+# timed_to <file> <name> <command...>: like timed, and also writes the seconds to $OUT/<file>.
+timed_to() {
+	local file=$1 name=$2 t0
+	shift 2
+	t0=$(now)
+	"$@"
+	elapsed "$t0" >"$OUT/$file"
+	metric "$name" "$(cat "$OUT/$file") s"
+}
+
 # guest <machine> <stage> [arg]: runs a guest.sh stage and records its metric lines.
 guest() {
 	local log="$OUT/guest-$1-$2${3:+-${3//[^a-zA-Z0-9]/-}}.log" rc=0
@@ -41,6 +51,7 @@ guest() {
 
 state() { smolvm machine status --name "$1" --json | jq -r .state; }
 uptime_of() { smolvm machine exec --name "$1" -- cut -d' ' -f1 /proc/uptime; }
+host_mem() { free -m | awk '/^Mem:/ { m = "used=" $3 " avail=" $7 } /^Swap:/ { s = " swap=" $3 } END { print m s }'; }
 
 host_tools() {
 	local bin=$OUT/bin
@@ -93,11 +104,12 @@ platform() {
 	smolvm machine exec --name $PLAT -- cat /root/work.kubeconfig >"$OUT/work.kubeconfig"
 }
 
-resources() { # label machine-to-inspect
+# resources <label> <machine>: host memory, every VMM's memory and disk, and the machine's guest
+# memory, disk, CPU and clock.
+resources() {
 	local m
 	free -m
-	metric "host memory used, available, swap used ($1)" \
-		"$(free -m | awk '/^Mem:/ { m = $3 " MiB, " $7 " MiB" } /^Swap:/ { s = $3 " MiB" } END { print m ", " s }')"
+	metric "host memory, MiB ($1)" "$(host_mem)"
 	host_meminfo "$1"
 	for m in $(smolvm machine ls -q); do
 		vmm_memory "$m" "$1"
@@ -112,18 +124,15 @@ host_meminfo() { # label
 		"$(awk '/^(MemAvailable|Cached|Dirty|AnonPages|Mapped|Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' /proc/meminfo)"
 }
 
+# A branch child's VMM is not dumpable, so its /proc files need root.
 vmm_memory() { # machine label
-	local pid
-	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
-	sudo cat "/proc/$pid/smaps_rollup" >"$OUT/smaps-$1-${2//[^a-zA-Z0-9]/-}.txt"
-	metric "VMM $1 Rss, Pss, Pss_Shmem ($2)" \
-		"$(awk '/^(Rss|Pss|Pss_Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' "$OUT/smaps-$1-${2//[^a-zA-Z0-9]/-}.txt")"
+	local f="$OUT/smaps-$1-${2//[^a-zA-Z0-9]/-}.txt"
+	sudo cat "/proc/$(vmm_pid "$1")/smaps_rollup" >"$f"
+	metric "VMM $1 Rss, Pss, Pss_Shmem ($2)" "$(awk '/^(Rss|Pss|Pss_Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' "$f")"
 }
 
-vmm_pss() { # machine: the VMM's Pss in MiB
-	local pid
-	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
-	sudo awk '/^Pss:/ { printf "%d", $2 / 1024 }' "/proc/$pid/smaps_rollup"
+vmm_smaps() { # machine field: one smaps_rollup field of the VMM, in MiB
+	sudo awk -v f="$2:" '$1 == f { printf "%d", $2 / 1024 }' "/proc/$(vmm_pid "$1")/smaps_rollup"
 }
 
 # cpu_probe <machine> <label>: guest CPU use, and the guest clock against the host's.
@@ -174,19 +183,13 @@ idle_at_least() { # percent machine
 	((idle >= $1))
 }
 
-vmm_rss() { # machine: the VMM's Rss in MiB
-	local pid
-	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
-	sudo awk '/^Rss:/ { printf "%d", $2 / 1024 }' "/proc/$pid/smaps_rollup"
-}
-
 host_avail() { free -m | awk '/^Mem:/ { print $7 }'; }
 guest_avail() { smolvm machine exec --name "$1" -- awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo; }
 
 # zero_fill drops the guest's page cache, then writes zeros into guest tmpfs in 512 MiB steps,
 # so that stale pages become zero pages, which capture skips.
-# Each step can grow the VMM's memfd by 512 MiB, so it stops while the host still has 4 GiB available.
-# Filling all free guest RAM at once got the runner killed.
+# Each step can cost the host 512 MiB, so it stops while the host still has 4 GiB available:
+# an unbounded fill makes the runner shut down.
 zero_fill() {
 	local i=0 rss0 t0
 	host_meminfo "before guest drop_caches"
@@ -194,15 +197,15 @@ zero_fill() {
 	sleep 10
 	host_meminfo "10 s after guest drop_caches"
 	vmm_memory $PLAT "10 s after guest drop_caches"
-	rss0=$(vmm_rss $PLAT)
+	rss0=$(vmm_smaps $PLAT Rss)
 	t0=$(now)
 	while (($(host_avail) > 4096 && $(guest_avail $PLAT) > 2048)); do
 		smolvm machine exec --name $PLAT -- dd if=/dev/zero of=/mnt/zero/$i bs=1M count=512
 		i=$((i + 1))
-		echo "zero-filled $((i * 512)) MiB in $(since "$t0"): host available $(host_avail) MiB, VMM Rss $(vmm_rss $PLAT) MiB," \
-			"$(head -1 /proc/pressure/memory)"
+		echo "zero-filled $((i * 512)) MiB in $(since "$t0"): host available $(host_avail) MiB," \
+			"VMM Rss $(vmm_smaps $PLAT Rss) MiB, $(head -1 /proc/pressure/memory)"
 	done
-	metric "zero-filled guest memory" "$((i * 512)) MiB in $(since "$t0"), VMM Rss grew $(($(vmm_rss $PLAT) - rss0)) MiB"
+	metric "zero-filled guest memory" "$((i * 512)) MiB in $(since "$t0"), VMM Rss grew $(($(vmm_smaps $PLAT Rss) - rss0)) MiB"
 	metric "host, guest MemAvailable when the zero fill stopped" "$(host_avail) MiB, $(guest_avail $PLAT) MiB"
 	smolvm machine exec --name $PLAT -- sh -c 'rm -f /mnt/zero/*; umount /mnt/zero'
 }
@@ -215,28 +218,26 @@ zeroed_capture() {
 
 # restore <checkpoint>: replaces PLAT with SRC, restored from $CK/<checkpoint>.checkpoint.
 restore() {
-	local used t0 h0 u0 h1 u1
+	local used h0 u0 h1 u1
 	smolvm machine delete --name $PLAT -f
 	metric "restored checkpoint" "$1"
 	used=$(df -m --output=used / | tail -1)
-	t0=$(now)
-	echo "$t0" >"$OUT/restore-at"
-	timed "restore: create --from" smolvm machine create --name $SRC --from "$CK/$1.checkpoint"
+	timed_to create-s "restore: create --from" smolvm machine create --name $SRC --from "$CK/$1.checkpoint"
 	metric "restore: host disk added by create --from" "$(($(df -m --output=used / | tail -1) - used)) MiB"
 	metric "restore: largest files under \$HOME (allocated MiB)" \
 		"$(find "$HOME" -xdev -type f -size +256M -printf '%b %p\n' 2>/dev/null | sort -rn | head -8 |
 			awk -v h="$HOME/" '{ sub(h, "", $2); printf "%s%s %d", sep, $2, $1 / 2048; sep = ", " }')"
-	timed "restore: start" smolvm machine start --name $SRC
+	timed_to start-s "restore: start" smolvm machine start --name $SRC
 	h1=$(now)
 	u1=$(uptime_of $SRC)
 	read -r h0 u0 <"$CK/$1.clock"
 	metric "restore: host time from the pre-capture clock read" "$(awk -v a="$h0" -v b="$h1" 'BEGIN { printf "%.1f s", b - a }')"
 	metric "restore: guest uptime advance over the same span" "$(awk -v a="$u0" -v b="$u1" 'BEGIN { printf "%.1f s", b - a }')"
 	metric "restore: guest clock minus host clock" "$(clock_offset $SRC)"
+	echo "$u1" >"$OUT/guest-uptime-at-restore"
+	cut -d' ' -f1 /proc/uptime >"$OUT/host-uptime-at-restore"
 	vmm_memory $SRC "after restore"
 	host_meminfo "after restore"
-	df -m / /dev/shm /tmp /run
-	sudo ls -la /dev/shm
 	monitor >"$OUT/monitor.log" 2>&1 &
 	echo $! >"$OUT/monitor.pid"
 }
@@ -246,10 +247,9 @@ monitor() {
 	set +e
 	local m
 	while :; do
-		printf '%s %s %s' "$(date +%T)" "$(free -m | awk '/^Mem:/ { m = "used=" $3 " avail=" $7 } /^Swap:/ { s = " swap=" $3 } END { print m s }')" \
-			"$(awk '/^some/ { print "psi-" $2 }' /proc/pressure/memory)"
+		printf '%s %s %s' "$(date +%T)" "$(host_mem)" "$(awk '/^some/ { print "psi-" $2 }' /proc/pressure/memory)"
 		for m in $(smolvm machine ls -q); do
-			printf ' %s=%s/%sMiB' "$m" "$(vmm_stat "$m" | cut -d' ' -f3)" "$(vmm_pss "$m")"
+			printf ' %s=%s/%sMiB' "$m" "$(vmm_stat "$m" | cut -d' ' -f3)" "$(vmm_smaps "$m" Pss)"
 		done
 		echo
 		sleep 5
@@ -269,7 +269,7 @@ branch() { # env
 		smolvm machine exec --name $SRC -- /bin/sync
 		freeze=--freeze-source
 	fi
-	timed "$1: branch ${freeze:+$freeze }with 3 published ports" \
+	timed_to "$1-branch-s" "$1: branch ${freeze:+$freeze }with 3 published ports" \
 		smolvm machine branch --from $SRC --name "$1" $freeze -p "$m:6443" -p "$w:7443" -p "$r:5000"
 	now >"$OUT/$1-branched-at"
 	vmm_stat "$1" >"$OUT/$1-stat-at-branch"
@@ -291,6 +291,31 @@ deployments_available() { # env
 	done
 }
 
+# lease_renewals <env> <cluster> prints the renewTime of every node lease and every leader-election lease.
+lease_renewals() {
+	local ns jp='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.renewTime}{"\n"}{end}'
+	k "$1" "$2" -n kube-node-lease get leases -o jsonpath="$jp"
+	k "$1" "$2" -n kube-system get leases kube-controller-manager kube-scheduler -o jsonpath="$jp"
+	if [ "$2" = mgmt ]; then
+		for ns in capi-system capi-kubeadm-bootstrap-system capi-kubeadm-control-plane-system capd-system; do
+			k "$1" "$2" -n $ns get leases -o jsonpath="$jp"
+		done
+	fi
+}
+
+# leases_renewed <env> <cluster> <epoch>: every lease from lease_renewals was renewed after epoch.
+# A restore carries over Ready and Available conditions. A lease renewal shows a live kubelet or controller.
+leases_renewed() {
+	local renewals name t n=0
+	renewals=$(lease_renewals "$1" "$2") || return 1
+	echo "$renewals"
+	while read -r name t; do
+		[ -n "$t" ] && (($(date -d "$t" +%s) > ${3%.*})) || return 1
+		n=$((n + 1))
+	done <<<"$renewals"
+	((n > 0))
+}
+
 # gate <name> <t0> <command...>: retries the command for up to 15 min and records when it first passed.
 gate() {
 	local name=$1 t0=$2
@@ -303,7 +328,8 @@ gate() {
 	fi
 }
 
-# gates <env> <label>: waits for every gate in parallel, timing each from the branch.
+# gates <env> <label>: waits for every gate in parallel, timing each from when the branch returned,
+# or from now unless the label is "after branch".
 gates() {
 	local env=$1 t0 m w r p pids=() rc=0 tail_pid
 	read -r m w r < <(ports "$env")
@@ -323,8 +349,13 @@ gates() {
 	pids+=($!)
 	gate "$env: cert-manager, CAPI, CAPD, kapp-controller Deployments Available ($2)" "$t0" deployments_available "$env" &
 	pids+=($!)
+	gate "$env: mgmt node and leader leases renewed ($2)" "$t0" leases_renewed "$env" mgmt "$t0" &
+	pids+=($!)
+	gate "$env: work node and leader leases renewed ($2)" "$t0" leases_renewed "$env" work "$t0" &
+	pids+=($!)
 	for p in "${pids[@]}"; do wait "$p" || rc=1; done
-	metric "$env: all gates ($2)" "$(since "$t0")"
+	elapsed "$t0" >"$OUT/$env-gates-s"
+	metric "$env: all gates ($2)" "$(cat "$OUT/$env-gates-s") s"
 	kill $tail_pid
 	return $rc
 }
@@ -332,12 +363,13 @@ gates() {
 env_up() { # env
 	local probe
 	branch "$1"
-	cpu_probe "$1" "just after branch" &
+	cpu_probe "$1" "just after branch, during the gates" &
 	probe=$!
 	gates "$1" "after branch"
 	wait $probe
 	if [ "$1" = env-a ]; then
-		metric "restore to all env-a gates: create --from, start, branch, gates" "$(since "$(cat "$OUT/restore-at")")"
+		metric "restore to env-a gates: create --from + start + branch + gates" \
+			"$(cat "$OUT/create-s" "$OUT/start-s" "$OUT/env-a-branch-s" "$OUT/env-a-gates-s" | awk '{ s += $1 } END { printf "%.1f s", s }')"
 	fi
 	metric "$1 VMM minor faults, major faults, CPU s from branch to all gates" \
 		"$(echo "$(cat "$OUT/$1-stat-at-branch") $(vmm_stat "$1")" | awk '{ printf "%d, %d, %.1f s", $4 - $1, $5 - $2, $6 - $3 }')"
@@ -400,8 +432,8 @@ soak() {
 	: >"$log"
 	while ((SECONDS < end)); do
 		{
-			printf '%s %s' "$(date +%T)" "$(free -m | awk '/^Mem:/ { m = "used=" $3 " avail=" $7 } /^Swap:/ { s = " swap=" $3 } END { print m s }')"
-			for m in $SRC env-a env-b; do printf ' %s=%s/%sMiB' $m "$(state $m)" "$(vmm_pss $m)"; done
+			printf '%s %s' "$(date +%T)" "$(host_mem)"
+			for m in $SRC env-a env-b; do printf ' %s=%s/%sMiB' $m "$(state $m)" "$(vmm_smaps $m Pss)"; done
 			for m in env-a env-b; do
 				if timeout 60 smolvm machine exec --name $m --timeout 20s -- true >/dev/null 2>&1; then
 					printf ' exec-%s=ok' $m
@@ -414,7 +446,9 @@ soak() {
 		} | tee -a "$log"
 		sleep 10
 	done
-	metric "soak samples" "$(wc -l <"$log") over 15 min"
+	metric "soak: samples, first to last, largest gap" "$(awk '{ split($1, t, ":"); s = t[1] * 3600 + t[2] * 60 + t[3]
+		if (NR == 1) first = s; else if (s - last > gap) gap = s - last; last = s }
+		END { printf "%d, %d s, %d s", NR, last - first, gap }' "$log")"
 	metric "soak: peak host used, lowest available, peak swap used" "$(awk '{
 		for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] + 0 }
 		if (v["used"] > u) u = v["used"]; if (a == "" || v["avail"] < a) a = v["avail"]; if (v["swap"] > s) s = v["swap"]
@@ -427,8 +461,32 @@ soak() {
 	for p in exec-env-a exec-env-b 26443 27443 28443 29443; do
 		metric "soak: failed samples of $p" "$(grep -c " $p=FAIL" "$log" || true)"
 	done
-	if grep -qE ' exec-env-[ab]=FAIL' "$log"; then return 1; fi
-	! grep -E -o ' (src|env-a|env-b)=[a-z]*/' "$log" | grep -vqE '=(running|frozen)/'
+	# Fails on a failed exec, a VM neither running nor frozen, an API server down for 3 samples in a row,
+	# or fewer than 60 samples.
+	awk '{
+		for (i = 2; i <= NF; i++) {
+			split($i, kv, "=")
+			if (kv[1] ~ /^(src|env-a|env-b)$/) {
+				split(kv[2], sv, "/")
+				if (sv[1] != "running" && sv[1] != "frozen") bad = bad " " $1 ":" $i
+			} else if (kv[1] ~ /^exec-/ && kv[2] != "ok") {
+				bad = bad " " $1 ":" $i
+			} else if (kv[1] ~ /^[0-9]+$/) {
+				down[kv[1]] = kv[2] == "ok" ? 0 : down[kv[1]] + 1
+				if (down[kv[1]] == 3) bad = bad " " $1 ":" kv[1] "-down-3-samples"
+			}
+		}
+	}
+	END {
+		if (NR < 60) bad = bad " only-" NR "-samples"
+		if (bad != "") { print "soak failed:" bad; exit 1 }
+	}' "$log"
+}
+
+# host_oom_lines counts host kernel OOM lines logged after the restore.
+host_oom_lines() {
+	sudo dmesg | awk -v t="$(cat "$OUT/host-uptime-at-restore")" -F'[][]' \
+		'$2 + 0 >= t && tolower($0) ~ /out of memory|oom-kill|killed process/' | wc -l
 }
 
 after_soak() {
@@ -437,13 +495,13 @@ after_soak() {
 	gates env-b "after soak" || rc=1
 	guest env-a churn "env-a after soak" || rc=1
 	guest env-b churn "env-b after soak" || rc=1
-	host=$(sudo dmesg | grep -ciE 'out of memory|oom-kill|killed process' || true)
-	metric "host kernel OOM lines" "$host"
+	host=$(host_oom_lines)
+	metric "host kernel OOM lines since restore" "$host"
 	[ "$host" = 0 ] || rc=1
 	for m in env-a env-b; do
-		guest $m oom-lines || rc=1
+		guest $m oom-lines "$(cat "$OUT/guest-uptime-at-restore")" || rc=1
 	done
-	resources "after soak" env-a || rc=1
+	resources "after soak" env-a || true # diagnostics only
 	kill "$(cat "$OUT/monitor.pid")" || true
 	return $rc
 }
