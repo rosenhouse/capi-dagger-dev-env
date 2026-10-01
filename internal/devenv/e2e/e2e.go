@@ -18,9 +18,14 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 )
 
-const greetingName = "e2e"
+const (
+	greetingName = "e2e"
+	// workloadNamespace is where greeting-syncer copies Greetings, its --target-namespace default,
+	// and so where greeting-controller deploys hello and nginx.
+	workloadNamespace = "default"
+)
 
-// GreetingReachesWorkloadCluster sets a management-cluster Greeting for cluster, then waits for
+// GreetingReachesWorkloadCluster sets a Greeting for cluster in namespace of the management cluster, then waits for
 // hello, behind nginx in the workload cluster, to serve it. It does this twice to cover updates.
 func GreetingReachesWorkloadCluster(ctx context.Context, mgmtKubeconfig, workloadKubeconfig, namespace, cluster string) error {
 	mgmt, err := controllerRuntimeClient(mgmtKubeconfig)
@@ -52,7 +57,7 @@ func GreetingReachesWorkloadCluster(ctx context.Context, mgmtKubeconfig, workloa
 
 // serves checks the greeting through the proxy Service, by way of the API server's service proxy.
 func serves(ctx context.Context, cs kubernetes.Interface, message string) error {
-	body, err := cs.CoreV1().Services("default").ProxyGet("http", greetingName+"-proxy", "80", "/", nil).DoRaw(ctx)
+	body, err := cs.CoreV1().Services(workloadNamespace).ProxyGet("http", greetingName+"-proxy", "80", "/", nil).DoRaw(ctx)
 	if err != nil {
 		return err
 	}
