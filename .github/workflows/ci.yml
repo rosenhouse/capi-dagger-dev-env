@@ -12,7 +12,6 @@ concurrency:
 env:
   SMOLVM_VERSION: 1.22.0
   SMOLVM_LINUX_X86_64_SHA256: 00d2f057c963ff950846d4059af87bdddb7edf707750cdab863cb0879d6b339e
-  SMOLVM_IDLE_RECLAIM: "off"
 defaults:
   run:
     shell: bash
@@ -33,9 +32,14 @@ jobs:
   smolvm:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      SMOLVM_IDLE_RECLAIM: "off"
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm
+        with:
+          version: ${{ env.SMOLVM_VERSION }}
+          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
       - run: go test -v ./internal/devenv/smolvm/
         env:
           DEVENV_SMOLVM_TESTS: "1"
@@ -54,31 +58,74 @@ jobs:
           path: ${{ runner.temp }}/smolvm-logs
   devenv:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm
-      - run: go build -o /dev/null ./cmd/devenv
-      - run: |
-          go run ./cmd/devenv test --name ci 2>&1 | tee "$RUNNER_TEMP/first.log"
-          echo "$SECONDS" >"$RUNNER_TEMP/first.seconds"
-      # A second run with the same name checks cleanup and name reuse.
-      - run: |
-          go run ./cmd/devenv test --name ci 2>&1 | tee "$RUNNER_TEMP/second.log"
-          echo "$SECONDS" >"$RUNNER_TEMP/second.seconds"
-      - run: go run ./cmd/devenv down --name ci --purge && test ! -e .devenv/ci
+        with:
+          version: ${{ env.SMOLVM_VERSION }}
+          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
+      - run: go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
+      - name: devenv test
+        timeout-minutes: 15
+        run: |
+          go run ./cmd/devenv test --name ci 2>&1 | tee "$RUNNER_TEMP/test.log"
+          echo "$SECONDS" >"$RUNNER_TEMP/test.seconds"
+      # This reuses the name, and runs each command as a developer would.
+      - name: up, status, kubeconfig, redeploy and down
+        timeout-minutes: 15
+        run: |
+          go run ./cmd/devenv up --name ci 2>&1 | tee "$RUNNER_TEMP/up.log"
+          go run ./cmd/devenv status | tee "$RUNNER_TEMP/status.txt"
+          grep -qE '^ci +running +[0-9]+ +[0-9]+ +[0-9]+ ' "$RUNNER_TEMP/status.txt"
+          go run ./cmd/devenv kubeconfig --cluster workload >"$RUNNER_TEMP/workload.kubeconfig"
+          kubectl --kubeconfig "$RUNNER_TEMP/workload.kubeconfig" get nodes
+          go run ./cmd/devenv redeploy --name ci --version ci-redeploy 2>&1 | tee "$RUNNER_TEMP/redeploy.log"
+          go run ./cmd/devenv down --name ci --purge
+          test ! -e .devenv/ci
+      - name: Interrupt up while its VM starts
+        timeout-minutes: 5
+        run: |
+          setsid "$RUNNER_TEMP/devenv" up --name interrupted 2>"$RUNNER_TEMP/interrupt.log" & pid=$!
+          until smolvm machine ls -q | grep '^devenv-interrupted-' >/dev/null; do kill -0 "$pid"; sleep 0.1; done
+          # A terminal's Ctrl-C signals the whole process group.
+          kill -INT -- "-$pid"
+          status=0
+          wait "$pid" || status=$?
+          cat "$RUNNER_TEMP/interrupt.log"
+          test "$status" -ne 0
+          grep -q 'interrupted; deleted the VM' "$RUNNER_TEMP/interrupt.log"
+          "$RUNNER_TEMP/devenv" down --name interrupted --purge
+      - name: No VMs left
+        run: |
+          smolvm machine ls
+          test -z "$(smolvm machine ls -q)"
+          ! pgrep -af _boot-vm
       - name: Stage timings
         if: always()
         run: |
-          for run in first second; do
+          re='^\[ *([0-9.]+)s\] (.+): ([0-9.]+)s$'
+          # rows prints a table row for each stage in log $1. Rows after up's last stage belong to a redeploy.
+          rows() {
+            prefix=$2
+            while IFS= read -r line; do
+              [[ $line =~ $re ]] || continue
+              echo "| $prefix${BASH_REMATCH[2]} | ${BASH_REMATCH[3]} |"
+              if [ "${BASH_REMATCH[2]}" = "workload packages" ]; then
+                echo "| **up** | **${BASH_REMATCH[1]}** |"
+                prefix="redeploy: "
+              fi
+            done <"$1"
+          }
+          for run in test up redeploy; do
             [ -f "$RUNNER_TEMP/$run.log" ] || continue
-            echo "### Stage timings, $run run"
+            echo "### Stage timings, devenv $run"
             echo "| Stage | Seconds |"
             echo "| --- | ---: |"
-            sed -nE 's/^\[ *[0-9.]+s\] (.+): ([0-9.]+)s$/| \1 | \2 |/p' "$RUNNER_TEMP/$run.log"
-            sed -nE 's/^\[ *([0-9.]+)s\] workload packages: .*/| **up** | **\1** |/p' "$RUNNER_TEMP/$run.log"
-            if [ -f "$RUNNER_TEMP/$run.seconds" ]; then echo "| **devenv test** | **$(cat "$RUNNER_TEMP/$run.seconds")** |"; fi
+            rows "$RUNNER_TEMP/$run.log" "$([ $run = redeploy ] && echo 'redeploy: ')"
+            if [ $run = test ] && [ -f "$RUNNER_TEMP/test.seconds" ]; then echo "| **devenv test** | **$(cat "$RUNNER_TEMP/test.seconds")** |"; fi
           done | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -h 'container restarts' "$RUNNER_TEMP/test.log" | tee -a "$GITHUB_STEP_SUMMARY" || true
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -91,6 +138,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm
+        with:
+          version: ${{ env.SMOLVM_VERSION }}
+          sha256: ${{ env.SMOLVM_LINUX_X86_64_SHA256 }}
       - run: go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
       - name: Two environments at once, one with a random name
         timeout-minutes: 30
@@ -106,7 +156,8 @@ jobs:
           # Each sample: host memory used and the VMs' RSS in MiB, and disk used in GB.
           (while sleep 5; do
             echo "$(free -m | awk '/^Mem:/ { print $3 }') $(vms_rss) $(df --output=used -BG / | tail -1 | tr -d ' G')"
-          done >"$RUNNER_TEMP/usage.log") &
+          done >"$RUNNER_TEMP/usage.log") & sampler=$!
+          trap 'kill $sampler' EXIT
           "$RUNNER_TEMP/devenv" test --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
           "$RUNNER_TEMP/devenv" test 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
           status=0
@@ -116,11 +167,16 @@ jobs:
           say "Peak: $(peak 1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used, $(peak 2) MiB of it by the VMs;" \
             "$(peak 3) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk used."
           for env in a random; do
-            say "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s."
+            say "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s;" \
+              "$(sed -nE 's/^\[[a-z]+\] \[ *[0-9.]+s\] (container restarts: .*)/\1/p' "$RUNNER_TEMP/$env.log")."
           done
           say "Both tests took $SECONDS s."
           exit $status
       - run: test "$(ls .devenv)" = a
+      - name: No VMs left
+        run: |
+          test -z "$(smolvm machine ls -q)"
+          ! pgrep -af _boot-vm
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
