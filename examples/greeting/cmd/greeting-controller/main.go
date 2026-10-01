@@ -10,8 +10,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	demov1 "github.com/rosenhouse/capi-dagger-dev-env/api/v1alpha1"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/greetingcontroller"
+	demov1 "github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/api/v1alpha1"
+	"github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/internal/greetingcontroller"
 )
 
 func main() {

@@ -15,10 +15,11 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./...
-      - run: go test ./...
-      - run: go generate ./...
+      - run: go vet ./... ./examples/greeting/...
+      - run: go test ./... ./examples/greeting/...
+      - run: go generate ./... ./examples/greeting/...
       - run: test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
   devenv-test:
     strategy:
@@ -27,12 +28,17 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: examples/greeting
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       - run: go test ./devenv/build/ ./devenv/infra/
+        working-directory: .
         env:
           DEVENV_ENGINE_TESTS: "1"
       - run: go run ./cmd/devenv test --name ci
@@ -43,33 +49,37 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: devenv-${{ matrix.runner }}
-          path: .devenv/
+          path: examples/greeting/.devenv/
           include-hidden-files: true
   concurrent-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: examples/greeting
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       - name: Two environments at once, one with a random name
         shell: bash
         timeout-minutes: 25
         run: |
           go build -o /tmp/devenv ./cmd/devenv
-          (while sleep 5; do df --output=used -B1G / | tail -1; done > df.log) &
+          (while sleep 5; do df --output=used -B1G / | tail -1; done > /tmp/df.log) &
           /tmp/devenv test --name a 2>&1 | sed -u 's/^/[a] /' & a=$!
           /tmp/devenv test 2>&1 | sed -u 's/^/[random] /' & r=$!
           status=0
           wait $a || status=1
           wait $r || status=1
-          echo "Peak disk use: $(sort -n df.log | tail -1) GB of $(df --output=size -B1G / | tail -1) GB"
+          echo "Peak disk use: $(sort -n /tmp/df.log | tail -1) GB of $(df --output=size -B1G / | tail -1) GB"
           exit $status
       - run: test "$(ls .devenv)" = a
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: devenv-concurrent
-          path: .devenv/
+          path: examples/greeting/.devenv/
           include-hidden-files: true

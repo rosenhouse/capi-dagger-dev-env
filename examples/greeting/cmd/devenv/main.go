@@ -10,7 +10,7 @@ import (
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/cli"
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/greetinge2e"
+	"github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/internal/greetinge2e"
 )
 
 func main() { cli.Main(config) }
