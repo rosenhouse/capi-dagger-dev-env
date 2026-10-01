@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"dagger.io/dagger"
+	"golang.org/x/sync/errgroup"
 
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/build"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
@@ -31,6 +34,8 @@ type Options struct {
 type Environment struct {
 	state.Env
 	MgmtKubeconfig string
+	// Packages are rendered Package resources for the first-party bundles in the session registry.
+	Packages [][]byte
 
 	opts    Options
 	start   time.Time
@@ -83,6 +88,13 @@ func (e *Environment) bringUp(ctx context.Context) error {
 	if err := e.stage("preflight", func() error { return infra.Preflight(ctx, c) }); err != nil {
 		return err
 	}
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return e.managementCluster(ctx, c) })
+	g.Go(func() error { return e.stage("images and bundles", func() error { return e.publishPackages(ctx, c) }) })
+	return g.Wait()
+}
+
+func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) error {
 	if err := e.stage("docker daemon", func() (err error) {
 		e.infra, err = infra.Start(ctx, c, e.ID)
 		return err
@@ -110,6 +122,62 @@ func (e *Environment) bringUp(ctx context.Context) error {
 			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
 		})
 	})
+}
+
+// packages lists the first-party bundles and the images each one locks.
+var packages = []struct {
+	name   string
+	images []string
+}{
+	{"addon-manager", []string{"addon-manager"}},
+	{"greeting-syncer", []string{"greeting-syncer"}},
+	{"greeting-controller", []string{"greeting-controller", "hello"}},
+}
+
+func (e *Environment) publishPackages(ctx context.Context, c *dagger.Client) error {
+	reg, err := infra.StartRegistry(ctx, c)
+	if err != nil {
+		return err
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	root, err := build.ModuleRoot(wd)
+	if err != nil {
+		return err
+	}
+	src := build.Source(c, root)
+	refs := map[string]string{}
+	for name, image := range build.Images(c, src) {
+		if refs[name], err = reg.Push(ctx, image, name); err != nil {
+			return fmt.Errorf("push %s: %w", name, err)
+		}
+	}
+	for _, p := range packages {
+		lock, err := bundle.ImagesLock(subset(refs, p.images))
+		if err != nil {
+			return err
+		}
+		ref, err := reg.Push(ctx, bundle.Image(c, src.Directory("config/"+p.name), lock), "bundles/"+p.name)
+		if err != nil {
+			return fmt.Errorf("push bundle %s: %w", p.name, err)
+		}
+		pkg, err := bundle.Package(p.name+".demo.example.com", "0.1.0", ref)
+		if err != nil {
+			return err
+		}
+		e.Packages = append(e.Packages, pkg)
+	}
+	return nil
+}
+
+func subset(m map[string]string, keys []string) map[string]string {
+	out := map[string]string{}
+	for _, k := range keys {
+		out[k] = m[k]
+	}
+	return out
 }
 
 // Verify checks the environment from the host through its kubeconfigs.
