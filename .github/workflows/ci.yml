@@ -107,7 +107,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/cache-save.start" ]; then
             echo "| Cache save | $(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $(cat "$RUNNER_TEMP/cache-save.start") }") s |" >>"$RUNNER_TEMP/platform.md"
           fi
-          { cat "$RUNNER_TEMP/platform.md"; echo; .github/ci/timings.sh "save=$RUNNER_TEMP/save.log"; } >>"$GITHUB_STEP_SUMMARY"
+          { cat "$RUNNER_TEMP/platform.md"; echo; .github/ci/timings.sh "save=$RUNNER_TEMP/save.log"; } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -160,7 +160,7 @@ jobs:
             echo
             .github/ci/timings.sh "save=$RUNNER_TEMP/save.log" "test=$RUNNER_TEMP/test.log" "test again=$RUNNER_TEMP/again.log" \
               "up=$RUNNER_TEMP/up.log" "redeploy=$RUNNER_TEMP/redeploy.log"
-          } >>"$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -211,7 +211,7 @@ jobs:
             echo "| CPU | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs) |"
             echo
             .github/ci/timings.sh "test --cold=$RUNNER_TEMP/test.log"
-          } >>"$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -270,7 +270,7 @@ jobs:
             cat "$RUNNER_TEMP/concurrent.md" || true
             echo
             .github/ci/timings.sh "save=$RUNNER_TEMP/save.log" "a=$RUNNER_TEMP/a.log" "random=$RUNNER_TEMP/random.log"
-          } >>"$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
