@@ -2,8 +2,10 @@ package infra
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -77,7 +79,7 @@ func TestDrainingProxyReadsUpstreamWhileTheClientDoesNot(t *testing.T) {
 
 func TestDrainingProxyClosesAConnectionWhoseClientFallsTooFarBehind(t *testing.T) {
 	sent := make(chan error, 1)
-	proxyTo(t, upstream(t, func(c net.Conn) {
+	client := proxyTo(t, upstream(t, func(c net.Conn) {
 		_, err := c.Write(make([]byte, 32<<20))
 		sent <- err
 	}), 1<<20)
@@ -89,6 +91,51 @@ func TestDrainingProxyClosesAConnectionWhoseClientFallsTooFarBehind(t *testing.T
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("upstream blocked instead of the proxy closing the connection")
+	}
+	client.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, client); errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Error("the client's connection stayed open")
+	}
+}
+
+func TestDrainingProxyLimitCountsBytesNotReads(t *testing.T) {
+	sent := make(chan error, 1)
+	proxyTo(t, upstream(t, func(c net.Conn) {
+		// Fill the sockets' buffers, then send small writes that the proxy reads one at a time.
+		if _, err := c.Write(make([]byte, 24<<20)); err != nil {
+			sent <- err
+			return
+		}
+		for range 3000 {
+			if _, err := c.Write(make([]byte, 100)); err != nil {
+				sent <- err
+				return
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+		sent <- nil
+	}), 64<<20)
+
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Errorf("the proxy closed a connection less than 25 MiB behind: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream blocked")
+	}
+}
+
+func TestDrainingProxyKeepsAHalfClosedConnectionOpen(t *testing.T) {
+	client := proxyTo(t, upstream(t, func(c net.Conn) { io.Copy(c, c) }), 1<<20)
+	client.SetDeadline(time.Now().Add(5 * time.Second))
+
+	client.Write([]byte("hello"))
+	client.(*net.TCPConn).CloseWrite()
+
+	got, err := io.ReadAll(client)
+	if err != nil || string(got) != "hello" {
+		t.Errorf("read %q, %v", got, err)
 	}
 }
 
@@ -143,5 +190,19 @@ func TestClosingTheDrainingProxyClosesItsConnections(t *testing.T) {
 	}
 	if _, err := net.Dial("tcp", addr); err == nil {
 		t.Error("the proxy still accepts connections")
+	}
+}
+
+func TestInfraCloseStopsEveryTunnel(t *testing.T) {
+	var stopped []int
+	i := &Infra{closers: []func() error{
+		func() error { stopped = append(stopped, 1); return nil },
+		func() error { stopped = append(stopped, 2); return errors.New("2 failed") },
+	}}
+
+	err := i.Close()
+
+	if len(stopped) != 2 || err == nil || err.Error() != "2 failed" {
+		t.Errorf("stopped %v, err %v", stopped, err)
 	}
 }

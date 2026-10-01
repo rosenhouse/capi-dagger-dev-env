@@ -1,11 +1,14 @@
 package infra
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"dagger.io/dagger"
 )
@@ -13,7 +16,7 @@ import (
 // drainLimit bounds what the host buffers for each tunnel connection whose client stops reading.
 const drainLimit = 16 << 20
 
-// tunnel forwards a host port to port of svc and returns the host port, and a function that stops forwarding.
+// tunnel forwards a host port to port of svc. It returns the host port and a function that stops forwarding.
 // A Dagger host tunnel stalls all its connections while any one leaves data unread, so a proxy drains each one.
 func tunnel(ctx context.Context, c *dagger.Client, svc *dagger.Service, port int) (int, func() error, error) {
 	t, err := c.Host().Tunnel(svc, dagger.HostTunnelOpts{Ports: []dagger.PortForward{{Backend: port}}}).Start(ctx)
@@ -67,16 +70,22 @@ func drainingProxy(target string, limit int) (addr string, closeAll func() error
 	}
 	go func() {
 		for {
-			client, err := l.Accept()
-			if err != nil {
+			conn, err := l.Accept()
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			if err != nil {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			go func() {
+				client := conn.(*net.TCPConn)
 				defer client.Close()
-				upstream, err := net.Dial("tcp", target)
+				conn, err := net.Dial("tcp", target)
 				if err != nil {
 					return
 				}
+				upstream := conn.(*net.TCPConn)
 				defer upstream.Close()
 				if !track(client, upstream) {
 					return
@@ -97,41 +106,63 @@ func drainingProxy(target string, limit int) (addr string, closeAll func() error
 	}, nil
 }
 
-const chunkSize = 32 << 10
-
-// drain forwards between client and upstream until either closes, then closes both.
-func drain(client, upstream net.Conn, limit int) {
-	go func() {
-		io.Copy(upstream, client)
+// drain forwards between client and upstream until both directions end, then closes both.
+// An error, or upstream getting more than limit bytes ahead of the client, closes both at once.
+func drain(client, upstream *net.TCPConn, limit int) {
+	defer client.Close()
+	defer upstream.Close()
+	abort := func() {
 		client.Close()
 		upstream.Close()
-	}()
-	chunks := make(chan []byte, max(1, limit/chunkSize))
-	go func() {
-		defer close(chunks)
+	}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if _, err := io.Copy(upstream, client); err != nil {
+			abort()
+			return
+		}
+		upstream.CloseWrite()
+	})
+	var (
+		mu      sync.Mutex
+		ready   = sync.NewCond(&mu)
+		pending bytes.Buffer
+		eof     bool
+	)
+	wg.Go(func() {
+		buf := make([]byte, 32<<10)
 		for {
-			buf := make([]byte, chunkSize)
 			n, err := upstream.Read(buf)
-			if n > 0 {
-				select {
-				case chunks <- buf[:n]:
-				default:
-					client.Close()
-					upstream.Close()
-					return
-				}
+			mu.Lock()
+			pending.Write(buf[:n])
+			overflow := pending.Len() > limit
+			eof = err != nil || overflow
+			ready.Signal()
+			mu.Unlock()
+			if overflow {
+				abort()
 			}
-			if err != nil {
+			if eof {
 				return
 			}
 		}
-	}()
-	for chunk := range chunks {
+	})
+	for {
+		mu.Lock()
+		for pending.Len() == 0 && !eof {
+			ready.Wait()
+		}
+		if pending.Len() == 0 {
+			mu.Unlock()
+			client.CloseWrite()
+			break
+		}
+		chunk := bytes.Clone(pending.Next(32 << 10))
+		mu.Unlock()
 		if _, err := client.Write(chunk); err != nil {
-			upstream.Close()
-			for range chunks {
-			}
-			return
+			abort()
+			break
 		}
 	}
+	wg.Wait()
 }
