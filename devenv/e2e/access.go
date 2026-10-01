@@ -1,3 +1,4 @@
+// Package e2e checks a running environment from the host.
 package e2e
 
 import (

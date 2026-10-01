@@ -16,10 +16,10 @@ import (
 
 func TestSessionSeesHostEdits(t *testing.T) {
 	ctx, c, root := engineAndModule(t)
-	srcBefore, configBefore := versions(t, ctx, build.Source(c, root), build.Config(c, root))
+	srcBefore, configBefore := versions(t, ctx, build.Source(c, root), build.Config(c, root, configDirs))
 
 	edit(t, root)
-	srcAfter, configAfter := versions(t, ctx, build.Source(c, root), build.Config(c, root))
+	srcAfter, configAfter := versions(t, ctx, build.Source(c, root), build.Config(c, root, configDirs))
 
 	if srcAfter == srcBefore {
 		t.Errorf("Version(Source) stayed %s after an edit", srcBefore)
@@ -31,7 +31,7 @@ func TestSessionSeesHostEdits(t *testing.T) {
 
 func TestSnapshotIgnoresLaterHostEdits(t *testing.T) {
 	ctx, c, root := engineAndModule(t)
-	src, config, err := build.Snapshot(ctx, c, root)
+	src, config, err := build.Snapshot(ctx, c, build.Spec{Root: root, ConfigDirs: configDirs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,15 +46,7 @@ func TestSnapshotIgnoresLaterHostEdits(t *testing.T) {
 }
 
 func TestSecondSessionReusesTheBuild(t *testing.T) {
-	requireEngine(t)
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := build.ModuleRoot(wd)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, _, root := engineAndModule(t)
 	builtAt := func() string {
 		ctx := context.Background()
 		c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
@@ -62,7 +54,7 @@ func TestSecondSessionReusesTheBuild(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer c.Close()
-		b, err := build.FromHost(ctx, c, root, "")
+		b, err := build.FromHost(ctx, c, build.Spec{Root: root, Commands: []string{"./cmd/hello"}, ConfigDirs: configDirs}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -87,6 +79,8 @@ func requireEngine(t *testing.T) {
 	}
 }
 
+var configDirs = []string{"config/hello"}
+
 func engineAndModule(t *testing.T) (context.Context, *dagger.Client, string) {
 	t.Helper()
 	requireEngine(t)
@@ -98,13 +92,13 @@ func engineAndModule(t *testing.T) (context.Context, *dagger.Client, string) {
 	t.Cleanup(func() { c.Close() })
 	root := t.TempDir()
 	write(t, root, "go.mod", "module example\n")
-	write(t, root, "cmd/hello/main.go", "package main\n")
+	write(t, root, "cmd/hello/main.go", "package main\n\nfunc main() {}\n")
 	write(t, root, "config/hello/a.yaml", "a: 1\n")
 	return ctx, c, root
 }
 
 func edit(t *testing.T, root string) {
-	write(t, root, "cmd/hello/main.go", "package main\n\nfunc main() {}\n")
+	write(t, root, "cmd/hello/main.go", "package main\n\nvar version string\n\nfunc main() {}\n")
 	write(t, root, "config/hello/a.yaml", "a: 2\n")
 }
 

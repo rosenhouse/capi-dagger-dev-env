@@ -2,7 +2,9 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -12,18 +14,50 @@ import (
 
 var AppGVR = schema.GroupVersionResource{Group: "kappctrl.k14s.io", Version: "v1alpha1", Resource: "apps"}
 
-// AppDeployed returns nil once the kapp-controller App fetches bundle and has reconciled its current generation.
-// A PackageInstall's App shares its name and namespace.
-func AppDeployed(ctx context.Context, dyn dynamic.Interface, namespace, name, bundle string) error {
-	app, err := dyn.Resource(AppGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+// BundleAppsDeployed returns nil once every kapp-controller App, in any namespace, that fetches from the repository
+// of one of bundles fetches that bundle and has reconciled its current generation. It fails while no App fetches one.
+func BundleAppsDeployed(ctx context.Context, dyn dynamic.Interface, bundles []string) error {
+	want := map[string]string{}
+	for _, bundle := range bundles {
+		repo, _, _ := strings.Cut(bundle, "@")
+		want[repo] = bundle
+	}
+	list, err := dyn.Resource(AppGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
-	fetch, _, _ := unstructured.NestedSlice(app.Object, "spec", "fetch")
-	var fetched string
-	if len(fetch) > 0 {
-		fetched, _, _ = unstructured.NestedString(fetch[0].(map[string]any), "imgpkgBundle", "image")
+	fetching := map[string]bool{}
+	var errs []error
+	for _, app := range list.Items {
+		fetched := fetchedBundle(app)
+		repo, _, _ := strings.Cut(fetched, "@")
+		bundle, ok := want[repo]
+		if !ok {
+			continue
+		}
+		fetching[bundle] = true
+		errs = append(errs, appDeployed(app, fetched, bundle))
 	}
+	for _, bundle := range bundles {
+		if !fetching[bundle] {
+			errs = append(errs, fmt.Errorf("no App fetches %s", bundle))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func fetchedBundle(app unstructured.Unstructured) string {
+	fetch, _, _ := unstructured.NestedSlice(app.Object, "spec", "fetch")
+	if len(fetch) == 0 {
+		return ""
+	}
+	step, _ := fetch[0].(map[string]any)
+	image, _, _ := unstructured.NestedString(step, "imgpkgBundle", "image")
+	return image
+}
+
+func appDeployed(app unstructured.Unstructured, fetched, bundle string) error {
+	namespace, name := app.GetNamespace(), app.GetName()
 	if fetched != bundle {
 		return fmt.Errorf("App %s/%s fetches %s, not %s", namespace, name, fetched, bundle)
 	}
@@ -31,7 +65,7 @@ func AppDeployed(ctx context.Context, dyn dynamic.Interface, namespace, name, bu
 	if observed != app.GetGeneration() {
 		return fmt.Errorf("App %s/%s not yet reconciled at generation %d", namespace, name, app.GetGeneration())
 	}
-	if !hasTrueCondition(*app, "ReconcileSucceeded") {
+	if !hasTrueCondition(app, "ReconcileSucceeded") {
 		msg, _, _ := unstructured.NestedString(app.Object, "status", "friendlyDescription")
 		if useful, _, _ := unstructured.NestedString(app.Object, "status", "usefulErrorMessage"); useful != "" {
 			msg += ": " + useful

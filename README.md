@@ -30,3 +30,21 @@ Reusing a name with `--name` reuses that environment's cached images.
 API server tunnels listen on all host interfaces.
 A tunnel stalls while any connection through it stays open with data unread, for example from a suspended `kubectl`. It recovers about 30 seconds after that connection closes.
 A failure names the stage and the readiness gate that failed.
+
+## Use with your own controllers
+
+Write a `main` package that passes your commands, packages and tests to `cli.Main`:
+
+```go
+func main() {
+	cli.Main(devenv.Config{
+		Commands: []string{"./cmd/manager"},
+		Packages: []devenv.Package{
+			{Name: "manager", RefName: "manager.example.com", Config: "config/manager", Images: []string{"manager"}},
+		},
+		Test: func(ctx context.Context, e *devenv.Environment) error { /* ... */ },
+	})
+}
+```
+
+See [`devenv.Config`](devenv/config.go) for each field, and [`cmd/devenv`](cmd/devenv/main.go) for the Greeting example's configuration.

@@ -50,6 +50,7 @@ type Environment struct {
 	// bundles maps each package name to its bundle's digest reference.
 	bundles map[string]string
 
+	cfg    Config
 	opts   Options
 	start  time.Time
 	ctx    context.Context
@@ -66,12 +67,25 @@ type Environment struct {
 	closers     []func() error
 }
 
-// Up brings up an environment and waits for its readiness gates.
-func Up(ctx context.Context, o Options) (*Environment, error) {
+// Up brings up an environment for cfg's components and waits for its readiness gates.
+func Up(ctx context.Context, cfg Config, o Options) (*Environment, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	if cfg.Root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Root, err = build.ModuleRoot(wd); err != nil {
+			return nil, err
+		}
+	}
 	e, err := start(ctx, o)
 	if err != nil {
 		return nil, err
 	}
+	e.cfg = cfg
 	if err := e.bringUp(e.ctx); err != nil {
 		e.ExportLogs()
 		e.Close()
@@ -197,11 +211,9 @@ func (e *Environment) bringUp(ctx context.Context) error {
 const (
 	WorkloadCluster   = "work"
 	WorkloadNamespace = "default"
-	// remotePackageInstall is the name addon-manager gives greeting-controller's PackageInstall.
-	remotePackageInstall = WorkloadCluster + "-greeting-controller"
 )
 
-// workloadCluster creates the workload cluster and waits for addon-manager to install greeting-controller into it.
+// workloadCluster creates the workload cluster, tunnels its API server, and waits for the consumer's components.
 func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) error {
 	if err := platform.CreateWorkloadCluster(ctx, c, e.infra, WorkloadCluster, WorkloadNamespace); err != nil {
 		return err
@@ -218,15 +230,13 @@ func (e *Environment) workloadCluster(ctx context.Context, c *dagger.Client) err
 	}); err != nil {
 		return err
 	}
-	if err := ready.Wait(ctx, ready.Gate{
-		Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second,
-		Check: func(ctx context.Context) error {
-			return kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall)
-		},
-	}); err != nil {
+	if err := e.stage("workload API", func() error { return e.workloadAPI(ctx) }); err != nil {
 		return err
 	}
-	return e.stage("workload API", func() error { return e.workloadAPI(ctx) })
+	if e.cfg.Ready == nil {
+		return nil
+	}
+	return e.stage("consumer components", func() error { return e.cfg.Ready(ctx, e) })
 }
 
 // workloadAPI tunnels the workload API server to the host and writes its kubeconfig.
@@ -299,64 +309,52 @@ func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) e
 	return g.Wait()
 }
 
+// packageVersion is the version of every Package. Redeploys update Packages in place.
 const packageVersion = "0.1.0"
-
-// packages lists the first-party bundles, the images each one locks, and whether it runs on the management cluster.
-var packages = []struct {
-	name   string
-	images []string
-	mgmt   bool
-}{
-	{"addon-manager", []string{"addon-manager"}, true},
-	{"greeting-syncer", []string{"greeting-syncer"}, true},
-	{"greeting-controller", []string{"greeting-controller", "hello"}, false},
-}
-
-func refName(pkg string) string { return pkg + ".demo.example.com" }
 
 // publishPackages builds images and bundles from the current source, stamped with version,
 // or with a digest of the source if version is empty.
 func (e *Environment) publishPackages(ctx context.Context, version string) error {
 	c, reg := e.client, e.registry
-	wd, err := os.Getwd()
+	spec := build.Spec{Root: e.cfg.Root, Commands: e.cfg.Commands}
+	for _, p := range e.cfg.Packages {
+		spec.ConfigDirs = append(spec.ConfigDirs, p.Config)
+	}
+	b, err := build.FromHost(ctx, c, spec, version)
 	if err != nil {
 		return err
 	}
-	root, err := build.ModuleRoot(wd)
-	if err != nil {
-		return err
-	}
-	b, err := build.FromHost(ctx, c, root, version)
-	if err != nil {
-		return err
+	images := build.Images(c, b.Binaries, e.cfg.Commands)
+	if e.cfg.Images != nil {
+		maps.Copy(images, e.cfg.Images(c, b.Source, b.Version))
 	}
 	refs := map[string]string{}
-	for name, image := range build.Images(c, b.Binaries) {
+	for name, image := range images {
 		if refs[name], err = reg.Push(ctx, image, name); err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
 		}
 	}
 	var pkgs [][]byte
 	bundles := map[string]string{}
-	for _, p := range packages {
-		images, err := subset(refs, p.images)
+	for _, p := range e.cfg.Packages {
+		images, err := subset(refs, p.Images)
 		if err != nil {
-			return fmt.Errorf("package %s: %w", p.name, err)
+			return fmt.Errorf("package %s: %w", p.Name, err)
 		}
 		lock, err := bundle.ImagesLock(images)
 		if err != nil {
 			return err
 		}
-		ref, err := reg.Push(ctx, bundle.Image(c, b.Config.Directory(p.name), lock), "bundles/"+p.name)
+		ref, err := reg.Push(ctx, bundle.Image(c, b.Config.Directory(p.Config), lock), "bundles/"+p.Name)
 		if err != nil {
-			return fmt.Errorf("push bundle %s: %w", p.name, err)
+			return fmt.Errorf("push bundle %s: %w", p.Name, err)
 		}
-		pkg, err := bundle.Package(refName(p.name), packageVersion, ref)
+		pkg, err := bundle.Package(p.RefName, packageVersion, ref)
 		if err != nil {
 			return err
 		}
 		pkgs = append(pkgs, pkg)
-		bundles[p.name] = ref
+		bundles[p.Name] = ref
 	}
 	e.Packages, e.bundles = pkgs, bundles
 	return nil
@@ -391,11 +389,11 @@ subjects:
 func (e *Environment) installPackages(ctx context.Context) error {
 	manifests := [][]byte{[]byte(installerManifests)}
 	manifests = append(manifests, e.Packages...)
-	for _, p := range packages {
-		if !p.mgmt {
+	for _, p := range e.cfg.Packages {
+		if p.On != Management {
 			continue
 		}
-		pkgi, err := bundle.PackageInstall(refName(p.name), packageVersion, "devenv", "devenv-installer")
+		pkgi, err := bundle.PackageInstall(p.Name, p.RefName, packageVersion, "devenv", "devenv-installer")
 		if err != nil {
 			return err
 		}
@@ -426,8 +424,8 @@ func subset(m map[string]string, keys []string) (map[string]string, error) {
 	return out, nil
 }
 
-// redeploy rebuilds images and bundles from the current source and waits for every package,
-// in both clusters, to deploy its new bundle. An empty version names the build by its source.
+// redeploy rebuilds images and bundles from the current source and waits for every App,
+// in any namespace, that fetches one of them to deploy the new bundle. An empty version names the build by its source.
 // It reports its stages to progress as well as to the environment's own progress.
 func (e *Environment) redeploy(ctx context.Context, version string, progress io.Writer) error {
 	stage := func(name string, run func() error) error {
@@ -445,21 +443,12 @@ func (e *Environment) redeploy(ctx context.Context, version string, progress io.
 		if err != nil {
 			return err
 		}
-		for _, p := range packages {
-			namespace, app := "devenv", p.name
-			if !p.mgmt {
-				namespace, app = WorkloadNamespace, remotePackageInstall
-			}
-			if err := ready.Wait(ctx, ready.Gate{
-				Name: fmt.Sprintf("App %s/%s deployed", namespace, app), Timeout: 5 * time.Minute, Interval: 2 * time.Second,
-				Check: func(ctx context.Context) error {
-					return kube.AppDeployed(ctx, dyn, namespace, app, e.bundles[p.name])
-				},
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return ready.Wait(ctx, ready.Gate{
+			Name: "Apps deployed their new bundles", Timeout: 5 * time.Minute, Interval: 2 * time.Second,
+			Check: func(ctx context.Context) error {
+				return kube.BundleAppsDeployed(ctx, dyn, slices.Collect(maps.Values(e.bundles)))
+			},
+		})
 	})
 }
 
@@ -489,7 +478,6 @@ func (e *Environment) Verify(ctx context.Context) error {
 		kube.NodesReady(ctx, workload),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
 		kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster),
-		kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall),
 	)
 }
 

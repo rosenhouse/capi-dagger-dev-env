@@ -1,7 +1,10 @@
 package bundle_test
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"sigs.k8s.io/yaml"
@@ -65,7 +68,7 @@ func TestPackageFetchesBundleAndResolvesImagesWithKbld(t *testing.T) {
 }
 
 func TestPackageInstallPinsVersionAndServiceAccount(t *testing.T) {
-	out, err := bundle.PackageInstall("addon-manager.demo.example.com", "0.1.0", "devenv", "devenv-installer")
+	out, err := bundle.PackageInstall("manager", "addon-manager.demo.example.com", "0.1.0", "devenv", "devenv-installer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +80,7 @@ func TestPackageInstallPinsVersionAndServiceAccount(t *testing.T) {
 	want := map[string]any{
 		"apiVersion": "packaging.carvel.dev/v1alpha1",
 		"kind":       "PackageInstall",
-		"metadata":   map[string]any{"name": "addon-manager", "namespace": "devenv"},
+		"metadata":   map[string]any{"name": "manager", "namespace": "devenv"},
 		"spec": map[string]any{
 			"serviceAccountName": "devenv-installer",
 			"packageRef": map[string]any{
@@ -88,5 +91,41 @@ func TestPackageInstallPinsVersionAndServiceAccount(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got  %v\nwant %v", got, want)
+	}
+}
+
+func TestPlaceholdersFindsTheImagesKbldResolves(t *testing.T) {
+	dir := t.TempDir()
+	config := `apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - image: controller
+      - image: nginx@sha256:0123
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+  helloImage: hello
+  proxyImage: nginx@sha256:0123
+---
+apiVersion: kbld.k14s.io/v1alpha1
+kind: Config
+searchRules:
+- keyMatcher:
+    name: helloImage
+- keyMatcher:
+    name: proxyImage
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := bundle.Placeholders(dir)
+
+	if err != nil || !slices.Equal(got, []string{"controller", "hello"}) {
+		t.Errorf("Placeholders() = %v, %v", got, err)
 	}
 }
