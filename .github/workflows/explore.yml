@@ -1,0 +1,51 @@
+name: explore
+on:
+  push:
+    branches: [smol-devenv-explore]
+env:
+  SMOLVM_VERSION: 1.22.0
+  SMOLVM_LINUX_X86_64_SHA256: 00d2f057c963ff950846d4059af87bdddb7edf707750cdab863cb0879d6b339e
+defaults:
+  run:
+    shell: bash
+jobs:
+  seq:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/smolvm
+      - run: bash hack/explore/seq.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seq
+          path: |
+            .devenv/
+            internal/.devenv/
+            ${{ runner.temp }}/explore
+          include-hidden-files: true
+  readme:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle
+          test -w /dev/kvm
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: bash hack/explore/readme.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme
+          path: |
+            .devenv/
+            ${{ runner.temp }}/explore
+          include-hidden-files: true
