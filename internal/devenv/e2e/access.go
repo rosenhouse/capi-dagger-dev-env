@@ -175,8 +175,7 @@ func upgradeFailed(err error) bool {
 }
 
 // closingProxy forwards connections to target until stop, which closes all of them.
-// A Dagger host tunnel stalls while any of its connections leaves data unread, and some
-// client-go streaming paths ignore their context, so a hung attempt must not leave connections open.
+// Some client-go streaming paths ignore their context, so a hung attempt must not leave connections open.
 func closingProxy(target string) (addr string, stop func(), err error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -5,59 +5,33 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"time"
 
-	"dagger.io/dagger"
-
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
-// Down asks the environment's up process to stop and waits for it to exit.
-func Down(ctx context.Context, env state.Env, out io.Writer) error {
-	running, err := env.Running()
+// Down deletes the VM of the environment called o.Name, or of the only one, or else the only running one.
+// With purge, it also deletes the environment's state dir.
+func Down(ctx context.Context, o Options, purge bool, out io.Writer) error {
+	machines, err := o.SmolVM.List(ctx)
 	if err != nil {
 		return err
 	}
-	if !running {
-		fmt.Fprintf(out, "Environment %s is not running.\n", env.Name)
-		return nil
-	}
-	fmt.Fprintf(out, "Stopping environment %s.\n", env.Name)
-	if err := control.Request(ctx, env.SocketPath(), "down", out); err != nil {
-		return err
-	}
-	return ready.Wait(ctx, ready.Gate{
-		Name: fmt.Sprintf("environment %s stopped", env.Name), Timeout: 5 * time.Minute, Interval: 100 * time.Millisecond,
-		Check: func(context.Context) error {
-			if running, err := env.Running(); err != nil || running {
-				return errors.Join(errors.New("up still holds the environment's lock"), err)
-			}
-			return nil
-		},
-	})
-}
-
-// Purge deletes a stopped environment's Docker data, state and socket. It holds the environment while it does.
-func Purge(ctx context.Context, env state.Env) error {
-	unlock, err := env.Lock()
+	env, err := state.Existing(o.StateDir, o.Name, machines)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
+	e, err := open(env, o, false)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
-	if err := infra.Purge(ctx, c, env.ID); err != nil {
-		return fmt.Errorf("purge Docker data: %w", err)
+	existed, err := e.Delete(ctx, purge)
+	if existed {
+		fmt.Fprintf(out, "Deleted the VM of environment %s.\n", env.Name)
+	} else {
+		fmt.Fprintf(out, "Environment %s has no VM.\n", env.Name)
 	}
-	if err := os.Remove(env.SocketPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if purge && err == nil {
+		fmt.Fprintf(out, "Deleted %s.\n", env.Dir)
 	}
-	return os.RemoveAll(env.Dir)
+	return errors.Join(err, e.Close())
 }

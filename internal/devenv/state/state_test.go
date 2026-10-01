@@ -1,23 +1,31 @@
 package state_test
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
 func TestNewRejectsNamesThatAreNotDNSLabels(t *testing.T) {
 	if _, err := state.New(t.TempDir(), "Not_A_Label"); err == nil {
 		t.Error("accepted invalid name")
+	}
+}
+
+func TestNewRejectsNamesThatSmolvmCannotUse(t *testing.T) {
+	if _, err := state.New(t.TempDir(), "a--b"); err == nil || !strings.Contains(err.Error(), "consecutive hyphens") {
+		t.Errorf("err = %v", err)
 	}
 }
 
@@ -55,6 +63,20 @@ func TestIDDistinguishesStateDirsThatShareAName(t *testing.T) {
 	}
 }
 
+// smolvmName matches the machine names smolvm accepts: src/data/mod.rs validate_vm_name in smolvm 1.22.0.
+var smolvmName = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_]|-[A-Za-z0-9_])*$`)
+
+func TestVMIsAValidSmolvmNameUniqueToTheStateDir(t *testing.T) {
+	longest := strings.Repeat("a", 62) + "z"
+	a, b := newEnv(t, t.TempDir(), longest), newEnv(t, t.TempDir(), longest)
+	if !smolvmName.MatchString(a.VM()) || len(a.VM()) > 128 {
+		t.Errorf("VM() = %q, which smolvm rejects", a.VM())
+	}
+	if a.VM() == b.VM() {
+		t.Errorf("two state dirs share VM %q", a.VM())
+	}
+}
+
 func TestLockRejectsASecondHolderUntilReleased(t *testing.T) {
 	root := t.TempDir()
 	unlock, err := newEnv(t, root, "alpha").Lock()
@@ -62,7 +84,7 @@ func TestLockRejectsASecondHolderUntilReleased(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := newEnv(t, root, "alpha").Lock(); err == nil || !strings.Contains(err.Error(), "alpha is already running") {
+	if _, err := newEnv(t, root, "alpha").Lock(); err == nil || !strings.Contains(err.Error(), "another devenv command is using environment alpha") {
 		t.Errorf("second Lock: err = %v", err)
 	}
 
@@ -121,64 +143,62 @@ func newEnv(t *testing.T, root, name string) state.Env {
 	return env
 }
 
-func TestLockWaitsOutABriefProbe(t *testing.T) {
-	env := newEnv(t, t.TempDir(), "alpha")
-	unlock, err := env.Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	unlock()
-	probe, err := os.Open(filepath.Join(env.Dir, "lock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.Flock(int(probe.Fd()), syscall.LOCK_SH); err != nil {
-		t.Fatal(err)
-	}
-	time.AfterFunc(30*time.Millisecond, func() { probe.Close() })
-
-	unlock, err = env.Lock()
-
-	if err != nil {
-		t.Fatal(err)
-	}
-	unlock()
-}
-
-func TestRunningWhileLocked(t *testing.T) {
+func TestRunningMeansTheVMIsRunning(t *testing.T) {
 	root := t.TempDir()
-	env := newEnv(t, root, "alpha")
-	if running, err := env.Running(); err != nil || running {
-		t.Errorf("before Lock: Running() = %v, %v", running, err)
-	}
-
-	unlock, err := env.Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if running, err := newEnv(t, root, "alpha").Running(); err != nil || !running {
-		t.Errorf("while locked: Running() = %v, %v", running, err)
-	}
-
-	unlock()
-	if running, err := env.Running(); err != nil || running {
-		t.Errorf("after unlock: Running() = %v, %v", running, err)
+	alpha, beta := newEnv(t, root, "alpha"), newEnv(t, root, "beta")
+	for _, c := range []struct {
+		machines []smolvm.Machine
+		state    smolvm.State
+	}{
+		{nil, ""},
+		{[]smolvm.Machine{{Name: beta.VM(), State: smolvm.Running}}, ""},
+		{[]smolvm.Machine{{Name: alpha.VM(), State: smolvm.Stopped}}, smolvm.Stopped},
+		{[]smolvm.Machine{{Name: alpha.VM(), State: smolvm.Created}}, smolvm.Created},
+		{[]smolvm.Machine{{Name: beta.VM(), State: smolvm.Stopped}, {Name: alpha.VM(), State: smolvm.Running}}, smolvm.Running},
+	} {
+		if got := alpha.VMState(c.machines); got != c.state {
+			t.Errorf("VMState(%+v) = %q, want %q", c.machines, got, c.state)
+		}
+		if got := alpha.Running(c.machines); got != (c.state == smolvm.Running) {
+			t.Errorf("Running(%+v) = %v", c.machines, got)
+		}
 	}
 }
 
-func TestSocketPathIsShortAndUnique(t *testing.T) {
-	t.Setenv("HOME", "/Users/a-rather-long-user-name")
-	t.Setenv("XDG_CACHE_HOME", "")
-	a := newEnv(t, t.TempDir(), strings.Repeat("a", 63))
-	b := newEnv(t, t.TempDir(), strings.Repeat("a", 63))
-	if len(a.SocketPath()) > 100 {
-		t.Errorf("SocketPath() = %s is longer than macOS allows", a.SocketPath())
+func TestPortsAreRecordedInTheEnvDir(t *testing.T) {
+	env := newEnv(t, t.TempDir(), "alpha")
+	if _, err := env.Ports(); err == nil || !strings.Contains(err.Error(), "no ports") {
+		t.Errorf("before WritePorts: err = %v", err)
 	}
-	if a.SocketPath() == b.SocketPath() {
-		t.Error("environments in different state dirs share a socket")
+	want := state.Ports{MgmtAPI: 1, WorkloadAPI: 2, Registry: 3}
+
+	if err := env.WritePorts(want); err != nil {
+		t.Fatal(err)
 	}
-	if strings.HasPrefix(a.SocketPath(), os.TempDir()) {
-		t.Errorf("SocketPath() = %s is in the temporary directory, which macOS cleans", a.SocketPath())
+
+	if got, err := newEnv(t, filepath.Dir(env.Dir), "alpha").Ports(); err != nil || got != want {
+		t.Errorf("Ports() = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+func TestFreePortsAreDistinctAndFree(t *testing.T) {
+	p, err := state.FreePorts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports := []int{p.MgmtAPI, p.WorkloadAPI, p.Registry}
+	for i, port := range ports {
+		for _, other := range ports[:i] {
+			if port == other {
+				t.Errorf("FreePorts() = %+v repeats %d", p, port)
+			}
+		}
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			t.Errorf("port %d: %v", port, err)
+			continue
+		}
+		l.Close()
 	}
 }
 
@@ -211,11 +231,11 @@ func TestListOfMissingRootIsEmpty(t *testing.T) {
 
 func TestExistingPicksTheOnlyEnvironmentWhenNameIsEmpty(t *testing.T) {
 	root := t.TempDir()
-	if _, err := state.Existing(root, ""); err == nil || !strings.Contains(err.Error(), "no environments in") {
+	if _, err := state.Existing(root, "", nil); err == nil || !strings.Contains(err.Error(), "no environments in") {
 		t.Errorf("no environments: err = %v", err)
 	}
 	_ = os.MkdirAll(filepath.Join(root, "alpha"), 0o700)
-	if env, err := state.Existing(root, ""); err != nil || env.Name != "alpha" {
+	if env, err := state.Existing(root, "", nil); err != nil || env.Name != "alpha" {
 		t.Errorf("Existing() = %+v, %v", env, err)
 	}
 }
@@ -224,25 +244,18 @@ func TestExistingPicksTheOnlyRunningEnvironmentWhenNameIsEmpty(t *testing.T) {
 	root := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(root, "alpha"), 0o700)
 	_ = os.MkdirAll(filepath.Join(root, "beta"), 0o700)
-	if _, err := state.Existing(root, ""); err == nil || !strings.Contains(err.Error(), "--name") {
+	alpha, beta := newEnv(t, root, "alpha"), newEnv(t, root, "beta")
+	if _, err := state.Existing(root, "", nil); err == nil || !strings.Contains(err.Error(), "--name") {
 		t.Errorf("none running: err = %v, want a hint to pass --name", err)
 	}
 
-	unlock, err := newEnv(t, root, "beta").Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-	if env, err := state.Existing(root, ""); err != nil || env.Name != "beta" {
+	machines := []smolvm.Machine{{Name: alpha.VM(), State: smolvm.Stopped}, {Name: beta.VM(), State: smolvm.Running}}
+	if env, err := state.Existing(root, "", machines); err != nil || env.Name != "beta" {
 		t.Errorf("beta running: Existing() = %+v, %v", env, err)
 	}
 
-	unlockAlpha, err := newEnv(t, root, "alpha").Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlockAlpha()
-	if _, err := state.Existing(root, ""); err == nil || !strings.Contains(err.Error(), "--name") {
+	machines[0].State = smolvm.Running
+	if _, err := state.Existing(root, "", machines); err == nil || !strings.Contains(err.Error(), "--name") {
 		t.Errorf("both running: err = %v, want a hint to pass --name", err)
 	}
 }
@@ -250,34 +263,34 @@ func TestExistingPicksTheOnlyRunningEnvironmentWhenNameIsEmpty(t *testing.T) {
 func TestExistingFindsANamedEnvironment(t *testing.T) {
 	root := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(root, "beta"), 0o700)
-	if env, err := state.Existing(root, "beta"); err != nil || env != newEnv(t, root, "beta") {
+	if env, err := state.Existing(root, "beta", nil); err != nil || env != newEnv(t, root, "beta") {
 		t.Errorf("Existing(beta) = %+v, %v", env, err)
 	}
-	if _, err := state.Existing(root, "gamma"); err == nil || !strings.Contains(err.Error(), "no environment gamma") {
+	if _, err := state.Existing(root, "gamma", nil); err == nil || !strings.Contains(err.Error(), "no environment gamma") {
 		t.Errorf("Existing(gamma): err = %v", err)
 	}
 }
 
 func TestKubeconfigOfARunningEnvironment(t *testing.T) {
 	env := newEnv(t, t.TempDir(), "alpha")
-	if _, err := env.Kubeconfig("mgmt"); err == nil || !strings.Contains(err.Error(), "not running") {
-		t.Errorf("stopped: err = %v", err)
-	}
-	unlock, err := env.Lock()
-	if err != nil {
+	if err := os.MkdirAll(env.Dir, 0o700); err != nil {
 		t.Fatal(err)
-	}
-	defer unlock()
-	if _, err := env.Kubeconfig("workload"); err == nil || !strings.Contains(err.Error(), "no workload kubeconfig") {
-		t.Errorf("not written: err = %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(env.Dir, "workload.kubeconfig"), []byte("config"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := env.Kubeconfig("workload"); err != nil || string(got) != "config" {
+	stopped := []smolvm.Machine{{Name: env.VM(), State: smolvm.Stopped}}
+	if _, err := env.Kubeconfig("workload", stopped); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Errorf("stopped: err = %v", err)
+	}
+	running := []smolvm.Machine{{Name: env.VM(), State: smolvm.Running}}
+	if _, err := env.Kubeconfig("mgmt", running); err == nil || !strings.Contains(err.Error(), "no mgmt kubeconfig") {
+		t.Errorf("not written: err = %v", err)
+	}
+	if got, err := env.Kubeconfig("workload", running); err != nil || string(got) != "config" {
 		t.Errorf("Kubeconfig(workload) = %q, %v", got, err)
 	}
-	if _, err := env.Kubeconfig("../lock"); err == nil || !strings.Contains(err.Error(), "mgmt or workload") {
+	if _, err := env.Kubeconfig("../lock", running); err == nil || !strings.Contains(err.Error(), "mgmt or workload") {
 		t.Errorf("Kubeconfig(../lock): err = %v", err)
 	}
 }
