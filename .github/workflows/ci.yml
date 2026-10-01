@@ -77,7 +77,7 @@ jobs:
             echo "| --- | ---: |"
             sed -nE 's/^\[ *[0-9.]+s\] (.+): ([0-9.]+)s$/| \1 | \2 |/p' "$RUNNER_TEMP/$run.log"
             sed -nE 's/^\[ *([0-9.]+)s\] workload packages: .*/| **up** | **\1** |/p' "$RUNNER_TEMP/$run.log"
-            [ -f "$RUNNER_TEMP/$run.seconds" ] && echo "| **devenv test** | **$(cat "$RUNNER_TEMP/$run.seconds")** |"
+            if [ -f "$RUNNER_TEMP/$run.seconds" ]; then echo "| **devenv test** | **$(cat "$RUNNER_TEMP/$run.seconds")** |"; fi
           done | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         uses: actions/upload-artifact@v4
