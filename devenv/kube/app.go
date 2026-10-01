@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,10 +16,11 @@ import (
 var AppGVR = schema.GroupVersionResource{Group: "kappctrl.k14s.io", Version: "v1alpha1", Resource: "apps"}
 
 // BundleAppsDeployed returns nil once every kapp-controller App, in any namespace, that fetches from the repository
-// of one of bundles fetches that bundle and has reconciled its current generation. It fails while no App fetches one.
-func BundleAppsDeployed(ctx context.Context, dyn dynamic.Interface, bundles []string) error {
+// of a bundle in required or optional fetches that bundle and has reconciled its current generation.
+// It fails while no App fetches a required bundle.
+func BundleAppsDeployed(ctx context.Context, dyn dynamic.Interface, required, optional []string) error {
 	want := map[string]string{}
-	for _, bundle := range bundles {
+	for _, bundle := range slices.Concat(required, optional) {
 		repo, _, _ := strings.Cut(bundle, "@")
 		want[repo] = bundle
 	}
@@ -29,16 +31,17 @@ func BundleAppsDeployed(ctx context.Context, dyn dynamic.Interface, bundles []st
 	fetching := map[string]bool{}
 	var errs []error
 	for _, app := range list.Items {
-		fetched := fetchedBundle(app)
-		repo, _, _ := strings.Cut(fetched, "@")
-		bundle, ok := want[repo]
-		if !ok {
-			continue
+		for _, fetched := range fetchedBundles(app) {
+			repo, _, _ := strings.Cut(fetched, "@")
+			bundle, ok := want[repo]
+			if !ok {
+				continue
+			}
+			fetching[bundle] = true
+			errs = append(errs, appDeployed(app, fetched, bundle))
 		}
-		fetching[bundle] = true
-		errs = append(errs, appDeployed(app, fetched, bundle))
 	}
-	for _, bundle := range bundles {
+	for _, bundle := range required {
 		if !fetching[bundle] {
 			errs = append(errs, fmt.Errorf("no App fetches %s", bundle))
 		}
@@ -46,14 +49,16 @@ func BundleAppsDeployed(ctx context.Context, dyn dynamic.Interface, bundles []st
 	return errors.Join(errs...)
 }
 
-func fetchedBundle(app unstructured.Unstructured) string {
+func fetchedBundles(app unstructured.Unstructured) []string {
 	fetch, _, _ := unstructured.NestedSlice(app.Object, "spec", "fetch")
-	if len(fetch) == 0 {
-		return ""
+	var images []string
+	for _, f := range fetch {
+		step, _ := f.(map[string]any)
+		if image, ok, _ := unstructured.NestedString(step, "imgpkgBundle", "image"); ok {
+			images = append(images, image)
+		}
 	}
-	step, _ := fetch[0].(map[string]any)
-	image, _, _ := unstructured.NestedString(step, "imgpkgBundle", "image")
-	return image
+	return images
 }
 
 func appDeployed(app unstructured.Unstructured, fetched, bundle string) error {

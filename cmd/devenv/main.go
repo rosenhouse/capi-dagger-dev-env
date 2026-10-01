@@ -8,7 +8,6 @@ import (
 
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv"
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/cli"
-	"github.com/rosenhouse/capi-dagger-dev-env/devenv/control"
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
 	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/greetinge2e"
@@ -49,7 +48,7 @@ func greeting(ctx context.Context, e *devenv.Environment) error {
 	if err := greetinge2e.GreetingReachesWorkloadCluster(ctx, e.MgmtKubeconfig, e.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster); err != nil {
 		return err
 	}
-	if err := control.Request(ctx, e.SocketPath(), "redeploy redeploy-test", io.Discard); err != nil {
+	if err := e.Redeploy(ctx, "redeploy-test", io.Discard); err != nil {
 		return err
 	}
 	return greetinge2e.HelloServesVersion(ctx, e.WorkloadKubeconfig, "redeploy-test")

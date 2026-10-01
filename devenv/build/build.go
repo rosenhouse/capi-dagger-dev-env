@@ -30,13 +30,13 @@ type Spec struct {
 // ImageName names a command's image after its directory.
 func ImageName(command string) string { return path.Base(command) }
 
-// Source selects the module's Go source under root, without tests.
+// Source selects the module under root, without tests, Git data, environment state or files Git ignores.
 // Each evaluation rereads the host, so a long-lived session sees edits.
 func Source(c *dagger.Client, root string) *dagger.Directory {
 	return c.Host().Directory(root, dagger.HostDirectoryOpts{
-		Include: []string{"go.mod", "go.sum", "**/*.go"},
-		Exclude: []string{"**/*_test.go", ".devenv/"},
-		NoCache: true,
+		Exclude:   []string{"**/*_test.go", ".git/", ".devenv/"},
+		Gitignore: true,
+		NoCache:   true,
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"dagger.io/dagger"
@@ -69,6 +70,38 @@ func TestSecondSessionReusesTheBuild(t *testing.T) {
 
 	if first != second {
 		t.Errorf("the second session rebuilt: built at %q, then %q", first, second)
+	}
+}
+
+func TestBuildsCommandsThatEmbedFiles(t *testing.T) {
+	ctx, c, root := engineAndModule(t)
+	write(t, root, "cmd/hello/main.go", "package main\n\nimport _ \"embed\"\n\n//go:embed greeting.txt\nvar greeting string\n\nfunc main() { println(greeting) }\n")
+	write(t, root, "cmd/hello/greeting.txt", "hi\n")
+
+	b, err := build.FromHost(ctx, c, build.Spec{Root: root, Commands: []string{"./cmd/hello"}, ConfigDirs: configDirs}, "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Binaries.File("hello").Sync(ctx); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestSourceLeavesOutTestsStateAndIgnoredFiles(t *testing.T) {
+	ctx, c, root := engineAndModule(t)
+	write(t, root, ".gitignore", "bin/\n")
+	for _, path := range []string{"bin/hello", ".devenv/env/log", "cmd/hello/main_test.go", "cmd/hello/data.txt"} {
+		write(t, root, path, "x\n")
+	}
+
+	got, err := build.Source(c, root).Glob(ctx, "**/*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{".gitignore", "cmd/", "cmd/hello/", "cmd/hello/data.txt", "cmd/hello/main.go", "config/", "config/hello/", "config/hello/a.yaml", "go.mod"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Source has %v, want %v", got, want)
 	}
 }
 
