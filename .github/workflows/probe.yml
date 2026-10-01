@@ -11,10 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { prepare: full, settle: 0 }
-          - { prepare: none, settle: 0 }
-          - { prepare: nofill, settle: 0 }
-          - { prepare: full, settle: 90 }
+          - { prepare: full, reserve: 512 }
+          - { prepare: full, reserve: 1024 }
+          - { prepare: full, reserve: 2048 }
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -25,10 +24,10 @@ jobs:
           sha256: 00d2f057c963ff950846d4059af87bdddb7edf707750cdab863cb0879d6b339e
       - run: |
           grep -m1 'model name' /proc/cpuinfo
-          go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv && "$RUNNER_TEMP/devenv" platform save
+          go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv && "$RUNNER_TEMP/devenv" platform save -v 2>&1 | grep -vE '^(I1|W1|E1)' | tail -300
         env:
           DEVENV_PROBE_PREPARE: ${{ matrix.prepare }}
-          DEVENV_PROBE_SETTLE: ${{ matrix.settle }}
+          DEVENV_PROBE_GUEST_RESERVE: ${{ matrix.reserve }}
       - name: exec after restoring the platform
         run: |
           ckpt=$(ls ~/.cache/devenv/platform/*.checkpoint)
@@ -48,7 +47,7 @@ jobs:
             curl -sk --max-time 3 https://localhost:26443/readyz && echo " mgmt readyz ok" || echo " mgmt readyz failed"
             sleep 5
           done
-          echo "| ${{ matrix.prepare }} settle ${{ matrix.settle }} | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) | $ok |" >>"$GITHUB_STEP_SUMMARY"
+          echo "| reserve ${{ matrix.reserve }} | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) | $ok |" >>"$GITHUB_STEP_SUMMARY"
           d=$(smolvm machine data-dir --name "$dst")
           echo "--- agent-startup-error.log"; cat "$d/agent-startup-error.log" || true
           echo "--- agent-console.log"; tail -c 6000 "$d/agent-console.log" || true
