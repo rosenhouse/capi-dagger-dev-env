@@ -285,6 +285,25 @@ func TestPlatformLetsTheBuildStartBeforeARestoreAndAfterAColdBoot(t *testing.T) 
 	}
 }
 
+func TestRestoreWaitsWhileAnotherEnvironmentRestores(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	e := f.open(t)
+	unlock, err := state.WaitLock(t.Context(), filepath.Join(f.o.CacheDir, "restore.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	if err := e.warmPlatform(ctx, "", fakeCheckpoint(t, f)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.calls(t); len(got) > 0 {
+		t.Errorf("smolvm calls = %q", got)
+	}
+}
+
 func TestPlatformDoesNotStartColdAfterAnInterruptedRestore(t *testing.T) {
 	f := fakeSmolvm(t, vm(""))
 	fakeHost(t, f)

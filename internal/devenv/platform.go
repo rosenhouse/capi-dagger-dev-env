@@ -75,7 +75,7 @@ func (e *Environment) warmPlatform(ctx context.Context, leftover smolvm.State, c
 			return err
 		}
 	}
-	if err := e.stage("restore VM", func() error { return e.vm.Restore(ctx, checkpoint) }); err != nil {
+	if err := e.stage("restore VM", func() error { return e.restoreVM(ctx, checkpoint) }); err != nil {
 		return err
 	}
 	if err := e.stage("start VM", func() error { return e.startRestored(ctx, checkpoint) }); err != nil {
@@ -85,6 +85,17 @@ func (e *Environment) warmPlatform(ctx context.Context, leftover smolvm.State, c
 		return err
 	}
 	return e.stage("platform gates", func() error { return e.platformGates(ctx) })
+}
+
+// restoreVM creates the VM from a checkpoint while no other environment does, because two at once each take
+// about four times as long as one.
+func (e *Environment) restoreVM(ctx context.Context, checkpoint string) error {
+	unlock, err := state.WaitLock(ctx, filepath.Join(e.opts.CacheDir, "restore.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return e.vm.Restore(ctx, checkpoint)
 }
 
 // startRestored publishes the restored VM's guest ports on free host ports instead of the captured ones, and starts it.
