@@ -62,7 +62,11 @@ func TestSecondSessionReusesTheBuild(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer c.Close()
-		stamp, err := build.Binaries(c, build.Source(c, root), "cache-test").File("built-at").Contents(ctx)
+		b, err := build.FromHost(ctx, c, root, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stamp, err := b.Binaries.File("built-at").Contents(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}

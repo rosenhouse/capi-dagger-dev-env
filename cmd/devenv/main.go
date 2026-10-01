@@ -69,6 +69,9 @@ func main() {
 			if testErr != nil {
 				env.ExportLogs()
 				testErr = fmt.Errorf("%w\nlogs: %s", testErr, env.Dir)
+				if o.Name == "" {
+					testErr = fmt.Errorf("%w\nclean up: devenv down --purge --name %s", testErr, env.Name)
+				}
 			}
 			if err := errors.Join(testErr, env.Close()); err != nil {
 				return err
@@ -76,7 +79,8 @@ func main() {
 			fmt.Printf("Environment %s passed.\n", env.Name)
 			if o.Name == "" {
 				// Nothing could reuse a random name's cached Docker data.
-				return devenv.Purge(cmd.Context(), env.Env)
+				fmt.Printf("Purging environment %s.\n", env.Name)
+				return devenv.Purge(context.WithoutCancel(cmd.Context()), env.Env)
 			}
 			return nil
 		},

@@ -326,17 +326,12 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 	if err != nil {
 		return err
 	}
-	src, config, err := build.Snapshot(ctx, c, root)
+	b, err := build.FromHost(ctx, c, root, version)
 	if err != nil {
 		return err
 	}
-	if version == "" {
-		if version, err = build.Version(ctx, src); err != nil {
-			return err
-		}
-	}
 	refs := map[string]string{}
-	for name, image := range build.Images(c, build.Binaries(c, src, version)) {
+	for name, image := range build.Images(c, b.Binaries) {
 		if refs[name], err = reg.Push(ctx, image, name); err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
 		}
@@ -352,7 +347,7 @@ func (e *Environment) publishPackages(ctx context.Context, version string) error
 		if err != nil {
 			return err
 		}
-		ref, err := reg.Push(ctx, bundle.Image(c, config.Directory(p.name), lock), "bundles/"+p.name)
+		ref, err := reg.Push(ctx, bundle.Image(c, b.Config.Directory(p.name), lock), "bundles/"+p.name)
 		if err != nil {
 			return fmt.Errorf("push bundle %s: %w", p.name, err)
 		}

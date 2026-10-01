@@ -35,6 +35,28 @@ func Config(c *dagger.Client, root string) *dagger.Directory {
 	return c.Host().Directory(root+"/config", dagger.HostDirectoryOpts{NoCache: true})
 }
 
+// Build is the commands built from one snapshot of the host, and that snapshot's package manifests.
+type Build struct {
+	Binaries *dagger.Directory
+	Config   *dagger.Directory
+	Version  string
+}
+
+// FromHost builds from a snapshot of the source and config under root.
+// An empty version names the build by the source's content.
+func FromHost(ctx context.Context, c *dagger.Client, root, version string) (Build, error) {
+	src, config, err := Snapshot(ctx, c, root)
+	if err != nil {
+		return Build{}, err
+	}
+	if version == "" {
+		if version, err = Version(ctx, src); err != nil {
+			return Build{}, err
+		}
+	}
+	return Build{Binaries: Binaries(c, src, version), Config: config, Version: version}, nil
+}
+
 // Snapshot pins the current content of Source and Config, so a save during a build does not change them.
 func Snapshot(ctx context.Context, c *dagger.Client, root string) (src, config *dagger.Directory, err error) {
 	if src, err = Source(c, root).Sync(ctx); err != nil {
