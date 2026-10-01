@@ -85,6 +85,32 @@ func TestCheckpointContract(t *testing.T) {
 	}
 }
 
+func TestCheckpointPorts(t *testing.T) {
+	path := writeFile(t, checkpoint([]byte("payload"), []byte(read(t, "testdata/manifest-amd-epyc-7763.json"))))
+
+	got, err := smolvm.CheckpointPorts(path)
+
+	if want := []smolvm.Port{{Host: 18080, Guest: 8080}}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("CheckpointPorts() = %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestCheckpointPortsOfACheckpointWithoutNetwork(t *testing.T) {
+	path := writeFile(t, checkpoint(nil, []byte(`{"checkpoint": {"cpu_contract": {"kind": "linux-kvm-intel-portable-v1"}}}`)))
+
+	if got, err := smolvm.CheckpointPorts(path); err != nil || len(got) > 0 {
+		t.Errorf("CheckpointPorts() = %v, %v; want none", got, err)
+	}
+}
+
+func TestCheckpointPortsRejectsAPackWithoutACheckpoint(t *testing.T) {
+	path := writeFile(t, checkpoint(nil, []byte(`{"mode": "vm"}`)))
+
+	if _, err := smolvm.CheckpointPorts(path); err == nil || !strings.Contains(err.Error(), "a pack without a checkpoint") {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestCheckpointContractRejectsMalformedFiles(t *testing.T) {
 	good := checkpoint([]byte("payload"), []byte(`{"checkpoint": {"cpu_contract": {"kind": "exact-v1", "fingerprint": "ab"}}}`))
 	footer := len(good) - 64
@@ -99,7 +125,7 @@ func TestCheckpointContractRejectsMalformedFiles(t *testing.T) {
 			edit(good, func(b []byte) { binary.LittleEndian.PutUint64(b[footer+44:], 1<<20) })},
 		{"manifest over 16 MiB", "exceeds 16 MiB", checkpoint(nil, make([]byte, 16<<20+1))},
 		{"manifest not JSON", "unexpected end of JSON input", checkpoint([]byte("payload"), []byte("{"))},
-		{"pack without a checkpoint", "no checkpoint CPU contract", checkpoint([]byte("payload"), []byte(`{"mode": "vm"}`))},
+		{"pack without a checkpoint", "a pack without a checkpoint", checkpoint([]byte("payload"), []byte(`{"mode": "vm"}`))},
 		{"contract without a kind", "no checkpoint CPU contract", checkpoint(nil, []byte(`{"checkpoint": {"cpu_contract": {}}}`))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

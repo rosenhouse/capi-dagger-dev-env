@@ -146,6 +146,24 @@ func TestWaitLockGivesUpWhenTheContextEnds(t *testing.T) {
 	}
 }
 
+func TestTryLockFailsWhileAnotherHolderHasTheLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent", "restore.lock")
+	unlock, err := state.TryLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := state.TryLock(path); !errors.Is(err, state.ErrLocked) {
+		t.Errorf("err = %v; want ErrLocked", err)
+	}
+	unlock()
+	unlockAgain, err := state.TryLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlockAgain()
+}
+
 func TestWriteKubeconfigTargetsLocalhostPortUnderEnvName(t *testing.T) {
 	env := newEnv(t, t.TempDir(), "alpha")
 	in := clientcmdapi.NewConfig()
@@ -365,7 +383,7 @@ func TestExistingFindsANamedEnvironment(t *testing.T) {
 	}
 }
 
-func TestKubeconfigOfARunningEnvironment(t *testing.T) {
+func TestKubeconfigOfAReadyEnvironment(t *testing.T) {
 	env := newEnv(t, t.TempDir(), "alpha")
 	if err := os.MkdirAll(env.Dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -378,6 +396,12 @@ func TestKubeconfigOfARunningEnvironment(t *testing.T) {
 		t.Errorf("stopped: err = %v", err)
 	}
 	running := []smolvm.Machine{{Name: env.VM(), State: smolvm.Running}}
+	if _, err := env.Kubeconfig("workload", running); err == nil || err.Error() != "environment alpha is not ready" {
+		t.Errorf("not ready: err = %v", err)
+	}
+	if err := env.MarkReady(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := env.Kubeconfig("mgmt", running); err == nil || !strings.Contains(err.Error(), "no mgmt kubeconfig") {
 		t.Errorf("not written: err = %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -37,6 +38,57 @@ func TestDownloadsRejectOtherArchitectures(t *testing.T) {
 	if _, err := Downloads("riscv64"); err == nil || !strings.Contains(err.Error(), "riscv64") {
 		t.Errorf("err = %v", err)
 	}
+}
+
+func TestZeroFillStepsKeepMemoryFreeOnTheHostAndInTheGuest(t *testing.T) {
+	for _, tc := range []struct{ hostMiB, guestMiB, want int }{
+		{hostMiB: 16000, guestMiB: 3100, want: 2},
+		{hostMiB: 3100, guestMiB: 6000, want: 2},
+		{hostMiB: 2000, guestMiB: 6000, want: 0},
+		{hostMiB: 16000, guestMiB: 2500, want: 0},
+	} {
+		if got := zeroFillSteps(tc.hostMiB, tc.guestMiB); got != tc.want {
+			t.Errorf("zeroFillSteps(%d, %d) = %d; want %d", tc.hostMiB, tc.guestMiB, got, tc.want)
+		}
+	}
+}
+
+func TestPullRetriesAStalledPull(t *testing.T) {
+	t.Parallel()
+	calls, out, err := runPull(t, "exec sleep 60", "echo 1")
+
+	if err == nil || !strings.Contains(out, "could not pull kindest/node") {
+		t.Errorf("err = %v, output %q", err, out)
+	}
+	if want := strings.Repeat("pull -q kindest/node\n", 3); calls != want {
+		t.Errorf("docker calls = %q; want %q", calls, want)
+	}
+}
+
+func TestPullLetsASlowPullProgress(t *testing.T) {
+	t.Parallel()
+	calls, out, err := runPull(t, "sleep 3", `n=$(cat "$DIR/size" 2>/dev/null || echo 0); echo $((n + 1)) | tee "$DIR/size"`)
+
+	if err != nil || calls != "pull -q kindest/node\n" {
+		t.Errorf("err = %v, output %q, docker calls %q; want one pull", err, out, calls)
+	}
+}
+
+// runPull runs pullScript for one image, with a stall of 1 s, and with docker and du run as the given scripts.
+// It returns docker's arguments, a line per call, and the script's output.
+func runPull(t *testing.T, docker, du string) (calls, out string, err error) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, script := range map[string]string{"docker": `echo "$@" >>"$DIR/calls"` + "\n" + docker, "du": du} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.CommandContext(t.Context(), "sh", "-eu", "-c", pullScript([]string{"kindest/node"}, 1, 1))
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "DIR="+dir)
+	output, err := cmd.CombinedOutput()
+	data, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	return string(data), string(output), err
 }
 
 func TestHostsTOMLPullsFromTheRegistryOverPlainHTTP(t *testing.T) {

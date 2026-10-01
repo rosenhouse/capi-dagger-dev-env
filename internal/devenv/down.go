@@ -51,7 +51,7 @@ func deleteWithoutState(ctx context.Context, o Options, machines []smolvm.Machin
 	if env.VMState(machines) == "" {
 		return notFound
 	}
-	if err := o.SmolVM.Delete(context.WithoutCancel(ctx), env.VM(), smolvm.DeleteOptions{}); err != nil {
+	if err := o.SmolVM.Delete(context.WithoutCancel(ctx), env.VM()); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Deleted the VM of environment %s.\n", env.Name)

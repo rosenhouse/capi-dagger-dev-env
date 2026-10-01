@@ -93,6 +93,21 @@ func TestWaitStopsWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestWaitNamesTheGateAndItsLastCheckWhenItsContextEnds(t *testing.T) {
+	bound := errors.New("the restored platform took over 20ms")
+	ctx, cancel := context.WithTimeoutCause(context.Background(), 20*time.Millisecond, bound)
+	defer cancel()
+	g := ready.Gate{Name: "leases renewed", Timeout: time.Hour, Interval: time.Millisecond, Check: func(context.Context) error {
+		return errors.New("kube-system/kube-scheduler not renewed")
+	}}
+
+	err := ready.Wait(ctx, g)
+
+	if want := `gate "leases renewed": the restored platform took over 20ms; last check: kube-system/kube-scheduler not renewed`; !errors.Is(err, bound) || err.Error() != want {
+		t.Errorf("err = %v; want %s", err, want)
+	}
+}
+
 func TestWaitRetriesAnAttemptThatHangs(t *testing.T) {
 	calls := 0
 	g := ready.Gate{Name: "port-forward", Timeout: time.Second, Interval: time.Millisecond, Attempt: 20 * time.Millisecond,

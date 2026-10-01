@@ -85,8 +85,11 @@ func (e Env) Lock() (unlock func(), err error) {
 	return func() { f.Close() }, nil
 }
 
-// WaitLock waits until it holds the lock file at path, or ctx ends. The lock lasts until unlock or process exit.
-func WaitLock(ctx context.Context, path string) (unlock func(), err error) {
+// ErrLocked is TryLock's error while another holder has the lock.
+var ErrLocked = errors.New("locked")
+
+// TryLock holds the lock file at path, or returns ErrLocked. The lock lasts until unlock or process exit.
+func TryLock(path string) (unlock func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -94,18 +97,25 @@ func WaitLock(ctx context.Context, path string) (unlock func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return func() { f.Close() }, nil
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, ErrLocked
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			f.Close()
-			return nil, err
+		return nil, err
+	}
+	return func() { f.Close() }, nil
+}
+
+// WaitLock waits until it holds the lock file at path, or ctx ends. The lock lasts until unlock or process exit.
+func WaitLock(ctx context.Context, path string) (unlock func(), err error) {
+	for {
+		unlock, err := TryLock(path)
+		if !errors.Is(err, ErrLocked) {
+			return unlock, err
 		}
 		select {
 		case <-ctx.Done():
-			f.Close()
 			return nil, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -225,13 +235,16 @@ func (e Env) ReadPorts() (Ports, error) {
 	return p, json.Unmarshal(data, &p)
 }
 
-// Kubeconfig returns the kubeconfig of the environment's mgmt or workload cluster, if its VM is running among machines.
+// Kubeconfig returns the kubeconfig of the environment's mgmt or workload cluster, if it is ready and its VM is running among machines.
 func (e Env) Kubeconfig(cluster string, machines []smolvm.Machine) ([]byte, error) {
 	if cluster != "mgmt" && cluster != "workload" {
 		return nil, fmt.Errorf("cluster %q is not mgmt or workload", cluster)
 	}
 	if !e.Running(machines) {
 		return nil, fmt.Errorf("environment %s is not running", e.Name)
+	}
+	if !e.Ready() {
+		return nil, fmt.Errorf("environment %s is not ready", e.Name)
 	}
 	kubeconfig, err := os.ReadFile(filepath.Join(e.Dir, cluster+".kubeconfig"))
 	if errors.Is(err, os.ErrNotExist) {

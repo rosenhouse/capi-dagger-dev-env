@@ -68,7 +68,17 @@ type artifacts struct {
 	config map[string]map[string][]byte
 }
 
-// build builds images from the current source, stamped with version, or with a digest of the source if version is empty.
+// buildImages builds images from the current source, stamped with version, or with a digest of the source if version is empty.
+// It waits while another environment builds, whose results Go's build cache then mostly holds.
+func (e *Environment) buildImages(ctx context.Context, version string) (a artifacts, err error) {
+	unlock, err := e.hostLock(ctx, "build")
+	if err != nil {
+		return artifacts{}, err
+	}
+	defer unlock()
+	return a, e.stage("build images", func() (err error) { a, err = e.build(ctx, version); return err })
+}
+
 func (e *Environment) build(ctx context.Context, version string) (artifacts, error) {
 	out, err := os.MkdirTemp("", "devenv-build-")
 	if err != nil {
@@ -215,8 +225,8 @@ func (e *Environment) Redeploy(ctx context.Context, version string) error {
 	if !validVersion.MatchString(version) {
 		return fmt.Errorf("version %q is not letters, digits and ._+-", version)
 	}
-	var a artifacts
-	if err := e.stage("build images", func() (err error) { a, err = e.build(ctx, version); return err }); err != nil {
+	a, err := e.buildImages(ctx, version)
+	if err != nil {
 		return err
 	}
 	if err := e.stage("push images and bundles", func() error { return e.push(ctx, a) }); err != nil {

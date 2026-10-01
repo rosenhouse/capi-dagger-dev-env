@@ -4,6 +4,7 @@ package smolvm
 import (
 	"cmp"
 	"context"
+	"embed"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,11 @@ import (
 
 // Version is the smolvm release this package drives.
 const Version = "1.22.0"
+
+// Source is this package's code, which the platform checkpoint's key hashes.
+//
+//go:embed *.go
+var Source embed.FS
 
 const installHint = "Install smolvm " + Version + " with: curl -fsSL https://raw.githubusercontent.com/smol-machines/smolvm/v" +
 	Version + "/scripts/install.sh | bash -s -- --version " + Version
