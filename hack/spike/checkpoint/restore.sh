@@ -25,7 +25,9 @@ for d in "$ckpts"/ckpt-*; do
       served=$(probe 18080)
       read -r h g u < <(clock r)
       read -r h0 u0 <"$d/clock.txt"
-      clock_note="uptime +$(diff_s "$u0" "$u") over host +$(diff_s "$h0" "$h"); realtime offset $(diff_s "$h" "$g"); clocksource $(guest r 'cat /sys/devices/system/clocksource/clocksource0/current_clocksource')"
+      sleep 5
+      read -r h2 _ u2 < <(clock r)
+      clock_note="uptime +$(diff_s "$u0" "$u") over host +$(diff_s "$h0" "$h"); realtime offset $(diff_s "$h" "$g"); guest/host rate $(rate "$h" "$u" "$h2" "$u2"); clocksource $(guest r 'cat /sys/devices/system/clocksource/clocksource0/current_clocksource')"
       result=ok
       [ -n "$served" ] || result="not serving"
     else

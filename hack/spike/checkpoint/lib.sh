@@ -21,6 +21,8 @@ guest() { smolvm machine exec --name "$1" --timeout 30s -- sh -c "$2"; }
 # clock NAME: prints "host_epoch guest_epoch guest_uptime".
 clock() { echo "$(date +%s.%N) $(guest "$1" 'date +%s; cut -d" " -f1 /proc/uptime' | tr '\n' ' ')"; }
 diff_s() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f s", b - a }'; }
+# rate H1 U1 H2 U2: guest uptime seconds per host second between two clock reads.
+rate() { awk -v h1="$1" -v u1="$2" -v h2="$3" -v u2="$4" 'BEGIN { printf "%.3f", (u2 - u1) / (h2 - h1) }'; }
 
 # probe PORT: prints what the guest server sends; empty if nothing answers.
 # A bare connect succeeds even with no guest listener, so read the payload.

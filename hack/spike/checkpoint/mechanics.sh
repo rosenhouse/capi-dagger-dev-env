@@ -39,6 +39,9 @@ measure "guest realtime minus host realtime, after restore" "$(diff_s "$h1" "$g1
 measure "tiny: VMM after restore" "$(rss tiny)"
 measure "tiny: guest clocksource" "$(guest tiny 'cat /sys/devices/system/clocksource/clocksource0/current_clocksource')"
 guest tiny 'dmesg | tail -15'
+sleep 5
+read -r h2 _ u2 < <(clock tiny)
+measure "tiny: guest/host clock rate after restore" "$(rate "$h1" "$u1" "$h2" "$u2")"
 echo "::endgroup::"
 
 echo "::group::C2 two branches with pinned ports"
