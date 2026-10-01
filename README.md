@@ -27,8 +27,8 @@ Each environment keeps its kubeconfigs and logs in `.devenv/<name>/`.
 Without `--name`, `kubeconfig`, `redeploy` and `down` act on the only environment, or else the only running one.
 Reusing a name with `--name` reuses that environment's cached images.
 `test` without `--name` deletes its environment's data once it passes.
-API server tunnels listen on all host interfaces.
-A tunnel stalls while any connection through it stays open with data unread, for example from a suspended `kubectl`. It recovers about 30 seconds after that connection closes.
+Kubeconfigs reach each API server through a proxy on 127.0.0.1, in front of a Dagger tunnel that listens on all host interfaces.
+The proxy closes a connection whose client stops reading, such as a suspended `kubectl`, before it can stall the tunnel.
 A failure names the stage and the readiness gate that failed.
 
 ## Use with your own controllers

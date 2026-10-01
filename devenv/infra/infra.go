@@ -3,8 +3,10 @@ package infra
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"dagger.io/dagger"
@@ -66,6 +68,9 @@ type Infra struct {
 	c     *dagger.Client
 	dind  *dagger.Service
 	tools *dagger.Container
+
+	mu      sync.Mutex
+	closers []func() error
 }
 
 var session = time.Now().Format(time.RFC3339Nano)
@@ -154,17 +159,27 @@ func (i *Infra) CreateManagementCluster(ctx context.Context) ([]byte, error) {
 	return []byte(out), nil
 }
 
-// Tunnel forwards a random host port to a DinD service port and returns the host port.
+// Tunnel forwards a random host port to a DinD service port and returns the host port. It forwards until Close.
 func (i *Infra) Tunnel(ctx context.Context, port int) (int, error) {
-	tunnel, err := i.c.Host().Tunnel(i.dind, dagger.HostTunnelOpts{Ports: []dagger.PortForward{{Backend: port}}}).Start(ctx)
+	hostPort, closeTunnel, err := tunnel(ctx, i.c, i.dind, port)
 	if err != nil {
 		return 0, err
 	}
-	ports, err := tunnel.Ports(ctx)
-	if err != nil {
-		return 0, err
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.closers = append(i.closers, closeTunnel)
+	return hostPort, nil
+}
+
+// Close stops the tunnels.
+func (i *Infra) Close() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	var errs []error
+	for _, c := range i.closers {
+		errs = append(errs, c())
 	}
-	return ports[0].Port(ctx)
+	return errors.Join(errs...)
 }
 
 // ForwardWorkloadAPI publishes a CAPD cluster's API server on WorkloadAPIPort of the Docker daemon.
