@@ -1,6 +1,8 @@
 package state_test
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
@@ -91,6 +94,41 @@ func TestLockRejectsASecondHolderUntilReleased(t *testing.T) {
 	unlock()
 	if _, err := newEnv(t, root, "alpha").Lock(); err != nil {
 		t.Errorf("Lock after unlock: %v", err)
+	}
+}
+
+func TestWaitLockWaitsForTheHolder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent", "start.lock")
+	unlock, err := state.WaitLock(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := time.Now().Add(100 * time.Millisecond)
+	time.AfterFunc(time.Until(released), unlock)
+
+	unlockAgain, err := state.WaitLock(t.Context(), path)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlockAgain()
+	if time.Now().Before(released) {
+		t.Error("took the lock while another holder had it")
+	}
+}
+
+func TestWaitLockGivesUpWhenTheContextEnds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "start.lock")
+	unlock, err := state.WaitLock(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	if _, err := state.WaitLock(ctx, path); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v", err)
 	}
 }
 

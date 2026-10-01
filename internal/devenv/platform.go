@@ -49,6 +49,8 @@ func (e *Environment) downloads() ([]infra.Download, error) {
 	return append(downloads, platform.Downloads()...), err
 }
 
+func (e *Environment) startLock() string { return filepath.Join(e.cacheDir, "start.lock") }
+
 func (e *Environment) cache() fetch.Cache {
 	return fetch.Cache{Dir: filepath.Join(e.cacheDir, "downloads")}
 }
@@ -93,8 +95,15 @@ func (e *Environment) platform(ctx context.Context) error {
 	return e.stage("workload API", e.workloadAPI(ctx))
 }
 
-// createVM deletes a VM that an earlier run left, then creates the environment's VM on free host ports.
+// createVM deletes a VM that an earlier run left, then creates and starts the environment's VM on free host ports.
+// A host-wide lock keeps other environments from taking the same ports meanwhile. It also serializes first starts:
+// smolvm 1.22.0 then expands its disk templates through one fixed scratch file, so a VM could boot from a half-written disk.
 func (e *Environment) createVM(ctx context.Context, leftover smolvm.State) error {
+	unlock, err := state.WaitLock(ctx, e.startLock())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if leftover != "" {
 		if err := e.vm.Delete(ctx); err != nil {
 			return err
