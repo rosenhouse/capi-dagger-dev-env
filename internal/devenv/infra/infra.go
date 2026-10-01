@@ -46,7 +46,7 @@ var tools = map[string]struct {
 	}},
 }
 
-// The node mounts the Docker socket for CAPD and containerd registry config for the session registry.
+// The node mounts the Docker socket for CAPD, and containerd config for the session registry and mirrors.
 var mgmtKindConfig = fmt.Sprintf(`kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
@@ -106,7 +106,7 @@ func Start(ctx context.Context, c *dagger.Client, envID, registryHost string, mi
 		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
 		WithNewFile(ContainerdCertsDir+"/"+registryHost+"/hosts.toml", hostsTOML("http://"+registryHost, registryHost))
 	for name, mirror := range mirrors {
-		daemon = daemon.WithNewFile(ContainerdCertsDir+"/"+name+"/hosts.toml", hostsTOML(Upstreams[name], mirror))
+		daemon = daemon.WithNewFile(ContainerdCertsDir+"/"+name+"/hosts.toml", hostsTOML(Upstreams[name], mirror.Host))
 	}
 	dind, err := daemon.
 		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+envID+"-docker"),
@@ -114,8 +114,7 @@ func Start(ctx context.Context, c *dagger.Client, envID, registryHost string, mi
 		WithExposedPort(2375).
 		AsService(dagger.ContainerAsServiceOpts{UseEntrypoint: true, InsecureRootCapabilities: true, Args: []string{
 			"--tls=false",
-			"--registry-mirror=http://" + mirrors["docker.io"],
-			"--insecure-registry=" + mirrors["docker.io"],
+			"--registry-mirror=http://" + mirrors["docker.io"].Host,
 		}}).
 		Start(ctx)
 	if err != nil {

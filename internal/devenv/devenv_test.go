@@ -108,12 +108,17 @@ func placeholders(t *testing.T, dir string) []string {
 	return slices.Sorted(maps.Keys(found))
 }
 
-func TestUnusedMirrorsNamesMirrorsWithEmptyCatalogs(t *testing.T) {
-	err := unusedMirrors(map[string]string{"docker.io": "library/busybox\n", "quay.io": "", "ghcr.io": "\n"})
-	if err == nil || err.Error() != "mirrors served nothing: ghcr.io, quay.io" {
+func TestMissingMirroredReposNamesWhatEachMirrorLacks(t *testing.T) {
+	want := map[string][]string{"docker.io": {"kindest/node", "kindest/kindnetd"}, "quay.io": {"jetstack/cert-manager-controller"}}
+	catalogs := map[string]string{"docker.io": "kindest/kindnetd\nlibrary/nginx\n", "quay.io": "jetstack/cert-manager-controller\n"}
+
+	err := missingMirroredRepos(catalogs, want)
+
+	if err == nil || err.Error() != "mirrors lack repositories: docker.io/kindest/node" {
 		t.Errorf("err = %v", err)
 	}
-	if err := unusedMirrors(map[string]string{"docker.io": "library/busybox\n"}); err != nil {
+	catalogs["docker.io"] += "kindest/node\n"
+	if err := missingMirroredRepos(catalogs, want); err != nil {
 		t.Errorf("err = %v", err)
 	}
 }

@@ -1,4 +1,5 @@
-// Package platform installs kapp-controller, Cluster API and CAPD on the management cluster.
+// Package platform installs kapp-controller, Cluster API and CAPD on the management cluster,
+// and creates the workload cluster.
 package platform
 
 import (
