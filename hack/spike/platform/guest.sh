@@ -30,7 +30,7 @@ nodes_ready() { # kubeconfig count
 }
 
 fetch() { # url sha256 dest
-	curl -fsSLo "$3" "$1"
+	curl -fsSL --retry 5 --retry-all-errors -o "$3" "$1"
 	echo "$2  $3" | sha256sum -c -
 }
 
@@ -237,6 +237,8 @@ resources() {
 	metric "guest /storage used ($1)" "$(df -m /storage | awk 'NR == 2 { print $3 " MiB" }')"
 	metric "guest root overlay used ($1)" "$(df -m / | awk 'NR == 2 { print $3 " MiB" }')"
 	metric "container restarts in mgmt, work ($1)" "$(restarts), $(restarts --kubeconfig /root/work.kubeconfig)"
+	metric "mgmt kube-apiserver restarts ($1)" \
+		"$(kubectl -n kube-system get pod kube-apiserver-mgmt-control-plane -o jsonpath='{.status.containerStatuses[0].restartCount}')"
 }
 
 # Samples guest CPU for 10 s: the split from /proc/stat, and the busiest processes.

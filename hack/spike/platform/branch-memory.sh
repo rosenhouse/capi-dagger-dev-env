@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compares a source VM with its --freeze-source branch, without Kubernetes:
-# reads of 2 GiB of guest page cache, a CPU-only loop, clock reads, synchronous disk writes,
+# reads of 2 GiB of guest page cache, rewrites of 2 GiB of tmpfs, a CPU-only loop, clock reads, synchronous disk writes,
 # and the VMM's CPU use while idle.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,6 +15,8 @@ timed_in() { # machine shell-command: prints the guest's own timing of the comma
 }
 
 read_cache() { timed_in "$1" 'cat /root/f >/dev/null'; }
+# Four writers, one per vCPU, overwrite 2 GiB of tmpfs in place.
+rewrite_shm() { timed_in "$1" 'for i in 1 2 3 4; do dd if=/dev/zero of=/dev/shm/f$i bs=1M count=512 conv=notrunc 2>/dev/null & done; wait'; }
 busy_loop() { timed_in "$1" 'i=0; while [ $i -lt 1000000 ]; do i=$((i + 1)); done'; }
 clock_read() { smolvm machine exec --name "$1" -- python3 /root/clock.py; }
 sync_write() { smolvm machine exec --name "$1" -- python3 /root/sync-write.py /storage/wal; }
@@ -40,9 +42,10 @@ smolvm machine start --name mem --branchable
 smolvm machine cp clock.py mem:/root/clock.py
 smolvm machine cp sync-write.py mem:/root/sync-write.py
 smolvm machine exec --name mem -- apk add -q python3
-smolvm machine exec --name mem -- sh -c 'dd if=/dev/urandom of=/root/f bs=1M count=2048 2>/dev/null && dd if=/dev/zero of=/storage/wal bs=1M count=64 conv=fsync 2>/dev/null && sync && cat /root/f >/dev/null && free -m'
+smolvm machine exec --name mem -- sh -c 'dd if=/dev/urandom of=/root/f bs=1M count=2048 2>/dev/null && dd if=/dev/zero of=/storage/wal bs=1M count=64 conv=fsync 2>/dev/null && for i in 1 2 3 4; do dd if=/dev/zero of=/dev/shm/f$i bs=1M count=512 2>/dev/null; done && sync && cat /root/f >/dev/null && free -m'
 metric "guest clocksource" "$(smolvm machine exec --name mem -- cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
 metric "source: read 2 GiB of cached file" "$(read_cache mem)"
+metric "source: rewrite 2 GiB of tmpfs" "$(rewrite_shm mem)"
 metric "source: busy loop" "$(busy_loop mem)"
 metric "source: one monotonic clock read in Python" "$(clock_read mem)"
 metric "source: VMM CPU while idle" "$(idle_cpu mem)"
@@ -51,6 +54,8 @@ smolvm machine exec --name mem -- /bin/sync
 smolvm machine branch --from mem --name child --freeze-source
 metric "child: first read of the cached file" "$(read_cache child)"
 metric "child: second read" "$(read_cache child)"
+metric "child: first rewrite of the tmpfs" "$(rewrite_shm child)"
+metric "child: second rewrite" "$(rewrite_shm child)"
 metric "child: busy loop" "$(busy_loop child)"
 metric "child: one monotonic clock read in Python" "$(clock_read child)"
 metric "child: VMM CPU while idle" "$(idle_cpu child)"

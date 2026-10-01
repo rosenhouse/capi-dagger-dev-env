@@ -45,10 +45,10 @@ guest() {
 host_tools() {
 	local bin=$OUT/bin
 	mkdir -p "$bin"
-	curl -fsSLo "$bin/kubectl" https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
+	curl -fsSL --retry 5 --retry-all-errors -o "$bin/kubectl" https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
 	echo "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f  $bin/kubectl" | sha256sum -c -
 	chmod +x "$bin/kubectl"
-	curl -fsSLo "$OUT/ggcr.tgz" https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz
+	curl -fsSL --retry 5 --retry-all-errors -o "$OUT/ggcr.tgz" https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz
 	echo "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0  $OUT/ggcr.tgz" | sha256sum -c -
 	tar -xzf "$OUT/ggcr.tgz" -C "$bin" crane
 	echo "$bin" >>"$GITHUB_PATH"
@@ -162,20 +162,28 @@ kubeconfig() { # guest-path host-port name
 	smolvm machine exec --name $ENV -- cat "$1" | sed "s#server: https://.*#server: https://localhost:$2#" >"$OUT/$3.kubeconfig"
 }
 
-kubectl_works() { # cluster local-port
-	local k=(kubectl --kubeconfig "$OUT/$1.kubeconfig") dns etcd pf
-	"${k[@]}" wait --for=condition=Ready nodes --all --timeout=5m
-	"${k[@]}" get nodes -o wide
-	"${k[@]}" -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-dns --timeout=5m
-	dns=$("${k[@]}" -n kube-system get pod -l k8s-app=kube-dns -o jsonpath='{.items[0].metadata.name}')
-	etcd=$("${k[@]}" -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].metadata.name}')
-	"${k[@]}" -n kube-system logs "$dns" --tail=2
-	"${k[@]}" -n kube-system exec "$etcd" -c etcd -- etcd --version
-	"${k[@]}" -n kube-system port-forward "pod/$dns" "$2:8080" >"$OUT/port-forward-$1.log" 2>&1 &
+# kubectl_attempt <cluster> <local-port> runs kubectl logs and port-forward against CoreDNS, and exec in etcd,
+# as e2e.KubectlWorks does.
+kubectl_attempt() {
+	local k=(kubectl --kubeconfig "$OUT/$1.kubeconfig" --request-timeout=30s) dns etcd pf ok=0
+	"${k[@]}" get nodes -o wide || return 1
+	dns=$("${k[@]}" -n kube-system get pod -l k8s-app=kube-dns --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}') || return 1
+	etcd=$("${k[@]}" -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].metadata.name}') || return 1
+	"${k[@]}" -n kube-system logs "$dns" --tail=1 || return 1
+	"${k[@]}" -n kube-system exec "$etcd" -c etcd -- etcd --version || return 1
+	"${k[@]}" -n kube-system port-forward "pod/$dns" "$2:8080" >>"$OUT/port-forward-$1.log" 2>&1 &
 	pf=$!
-	retry 120 curl -fsS "http://127.0.0.1:$2/health"
+	retry 30 curl -fsS "http://127.0.0.1:$2/health" && ok=1
+	kill $pf 2>/dev/null
+	wait $pf 2>/dev/null
 	echo
-	kill $pf
+	((ok))
+}
+
+# A branch's clusters are sluggish for minutes, so the checks retry.
+kubectl_works() { # cluster local-port
+	retry 300 kubectl --kubeconfig "$OUT/$1.kubeconfig" --request-timeout=30s wait --for=condition=Ready nodes --all --timeout=30s
+	retry 300 kubectl_attempt "$1" "$2"
 	metric "$1: kubectl logs, exec and port-forward from the host" ok
 }
 
@@ -200,14 +208,19 @@ host_access() {
 	cat "$OUT/monitor.log" "$OUT/vmstat.log"
 }
 
+run_pod() { # cluster image
+	kubectl --kubeconfig "$OUT/$1.kubeconfig" run spike-registry --restart=Never --image="$2" \
+		--dry-run=client -o yaml --command -- sleep 3600 |
+		kubectl --kubeconfig "$OUT/$1.kubeconfig" --request-timeout=30s apply -f -
+}
+
 registry() {
 	local ref=localhost:$H_REG/spike/busybox:1.37.0 digest c
 	timed "crane copy busybox into the session registry through the branch port" crane copy --platform linux/amd64 $BUSYBOX "$ref"
 	digest=$(crane digest "$ref")
 	metric "pushed image digest" "$digest"
 	for c in mgmt work; do
-		kubectl --kubeconfig "$OUT/$c.kubeconfig" run spike-registry --restart=Never \
-			--image="$GUEST_REGISTRY/spike/busybox@$digest" --command -- sleep 3600
+		retry 120 run_pod $c "$GUEST_REGISTRY/spike/busybox@$digest"
 		timed "$c pod from the session registry Ready" \
 			kubectl --kubeconfig "$OUT/$c.kubeconfig" wait --for=condition=Ready pod/spike-registry --timeout=3m
 		metric "$c pod imageID" "$(kubectl --kubeconfig "$OUT/$c.kubeconfig" get pod spike-registry -o jsonpath='{.status.containerStatuses[0].imageID}')"
