@@ -10,25 +10,43 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/e2e"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
 func main() {
-	o := devenv.Options{Progress: os.Stderr}
+	o := devenv.Options{Progress: os.Stderr, Command: command()}
 	root := &cobra.Command{Use: "devenv", SilenceUsage: true}
 	root.PersistentFlags().StringVar(&o.Name, "name", "", "environment name; up and test pick a random one if empty")
-	root.PersistentFlags().StringVar(&o.StateDir, "state-dir", ".devenv", "directory for kubeconfigs and logs")
+	root.PersistentFlags().StringVar(&o.StateDir, "state-dir", "", "directory for kubeconfigs and logs (default: .devenv in devenv's source)")
 	root.PersistentFlags().BoolVarP(&o.Verbose, "verbose", "v", false, "stream guest command output to stderr")
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		o.Source, err = devenv.Source(wd)
+		if o.StateDir == "" {
+			if err != nil {
+				return err
+			}
+			o.StateDir = filepath.Join(o.Source, ".devenv")
+		}
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return err
+		}
+		o.CacheDir = filepath.Join(cache, "devenv")
+		return nil
+	}
 
-	root.AddCommand(&cobra.Command{
+	upCmd := &cobra.Command{
 		Use:   "up",
 		Short: "Bring up an environment, which runs until down",
+		Long:  "Bring up the environment called --name, or else the only environment, or else a new one with a random name.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			env, err := devenv.Up(cmd.Context(), o)
@@ -36,88 +54,29 @@ func main() {
 				return err
 			}
 			fmt.Printf("Environment %s is up.\n  management: export KUBECONFIG=%s\n  workload:   export KUBECONFIG=%s\n"+
-				"After changing code, run: devenv redeploy --name %s\nTo delete it, run: devenv down --name %s\n",
-				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig, env.Name, env.Name)
+				"After changing code, run: %s redeploy --name %s\nTo delete it, run: %s down --name %s\n",
+				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig, o.Command, env.Name, o.Command, env.Name)
 			return env.Close()
 		},
-	})
-	root.AddCommand(&cobra.Command{
+	}
+	testCmd := &cobra.Command{
 		Use:   "test",
 		Short: "Bring up an environment, verify it, and delete it",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := cmd.Context()
-			random := o.Name == ""
-			if random {
-				env, err := state.New(o.StateDir, "")
-				if err != nil {
-					return err
-				}
-				o.Name = env.Name
-			}
-			cleanUp := func(err error) error {
-				if random {
-					return fmt.Errorf("%w\nclean up: devenv down --purge --name %s", err, o.Name)
-				}
-				return err
-			}
-			env, err := devenv.Up(ctx, o)
-			if err != nil {
-				return cleanUp(err)
-			}
-			testErr := env.Verify(ctx)
-			if testErr == nil {
-				testErr = errors.Join(e2e.KubectlWorks(ctx, env.MgmtKubeconfig), e2e.KubectlWorks(ctx, env.WorkloadKubeconfig))
-			}
-			if testErr == nil {
-				testErr = e2e.GreetingReachesWorkloadCluster(ctx, env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
-			}
-			if testErr == nil {
-				testErr = env.Redeploy(ctx, "redeploy-test")
-			}
-			if testErr == nil {
-				testErr = e2e.HelloServesVersion(ctx, env.WorkloadKubeconfig, "redeploy-test")
-			}
-			if testErr != nil {
-				env.ExportLogs(ctx)
-				testErr = cleanUp(fmt.Errorf("%w\nlogs: %s", testErr, env.Dir))
-			}
-			// Nothing reuses a random name's state once it passes.
-			_, deleteErr := env.Delete(ctx, random && testErr == nil)
-			if err := errors.Join(testErr, deleteErr, env.Close()); err != nil {
-				return err
-			}
-			fmt.Printf("Environment %s passed.\n", env.Name)
-			return nil
+			return devenv.Test(cmd.Context(), o, os.Stdout)
 		},
-	})
-
+	}
+	for _, cmd := range []*cobra.Command{upCmd, testCmd} {
+		cmd.Flags().BoolVar(&o.Retain, "retain", false, "keep the VM if bring-up fails, for debugging")
+		root.AddCommand(cmd)
+	}
 	root.AddCommand(&cobra.Command{
 		Use:   "status",
-		Short: "List environments with the state of their VMs",
+		Short: "List environments with the state of their VMs and their host ports",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			machines, err := devenv.Machines(cmd.Context(), o)
-			if err != nil {
-				return err
-			}
-			envs, err := state.List(o.StateDir)
-			if err != nil {
-				return err
-			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tVM\tKUBECONFIGS")
-			for _, env := range envs {
-				vm, kubeconfigs := string(env.VMState(machines)), []string(nil)
-				if vm == "" {
-					vm = "none"
-				}
-				if env.Running(machines) {
-					kubeconfigs, _ = filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", env.Name, vm, strings.Join(kubeconfigs, " "))
-			}
-			return w.Flush()
+			return devenv.Status(cmd.Context(), o, os.Stdout)
 		},
 	})
 	var cluster string
@@ -175,10 +134,18 @@ func main() {
 	downCmd.Flags().BoolVar(&purge, "purge", false, "also delete the environment's state dir")
 	root.AddCommand(downCmd)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	// After the first signal, a second one kills devenv.
 	context.AfterFunc(ctx, stop)
 	if err := root.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
+}
+
+// command returns how the user runs devenv. go run builds it in a temporary directory.
+func command() string {
+	if strings.Contains(os.Args[0], "go-build") {
+		return "go run ./cmd/devenv"
+	}
+	return os.Args[0]
 }

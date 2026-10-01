@@ -90,7 +90,7 @@ func writeMachines(dir string, machines []smolvm.Machine) {
 	}
 }
 
-// fake is a fake smolvm and an environment called alpha.
+// fake is a fake smolvm and an environment called alpha, whose state dir exists.
 type fake struct {
 	o   Options
 	env state.Env
@@ -100,8 +100,17 @@ type fake struct {
 // fakeSmolvm starts a fake smolvm whose machines are those that machines returns for alpha.
 func fakeSmolvm(t *testing.T, machines func(state.Env) []smolvm.Machine) fake {
 	t.Helper()
-	f := fake{o: Options{Name: "alpha", StateDir: t.TempDir(), SmolVM: smolvm.CLI{Path: os.Args[0]}}, dir: t.TempDir()}
-	var err error
+	source, err := Source(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := fake{
+		o: Options{
+			Name: "alpha", StateDir: t.TempDir(), Source: source, CacheDir: t.TempDir(),
+			Command: "go run ./cmd/devenv", SmolVM: smolvm.CLI{Path: os.Args[0]},
+		},
+		dir: t.TempDir(),
+	}
 	if f.env, err = state.New(f.o.StateDir, f.o.Name); err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +138,17 @@ func (f fake) calls(t *testing.T) []string {
 
 func (f fake) machines() []smolvm.Machine { return readMachines(f.dir) }
 
+// open holds alpha until the test ends.
+func (f fake) open(t *testing.T) *Environment {
+	t.Helper()
+	e, err := open(f.env, f.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { e.Close() })
+	return e
+}
+
 func vm(s smolvm.State) func(state.Env) []smolvm.Machine {
 	return func(env state.Env) []smolvm.Machine {
 		if s == "" {
@@ -138,8 +158,8 @@ func vm(s smolvm.State) func(state.Env) []smolvm.Machine {
 	}
 }
 
-// fakeHost stands in for /dev/kvm and fills the download cache, so Up needs neither KVM nor the network.
-func fakeHost(t *testing.T) {
+// fakeHost stands in for /dev/kvm and fills f's download cache, so Up needs neither KVM nor the network.
+func fakeHost(t *testing.T, f fake) {
 	t.Helper()
 	device := filepath.Join(t.TempDir(), "kvm")
 	if err := os.WriteFile(device, nil, 0o600); err != nil {
@@ -147,19 +167,12 @@ func fakeHost(t *testing.T) {
 	}
 	kvmDevice = device
 	t.Cleanup(func() { kvmDevice = "/dev/kvm" })
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		t.Fatal(err)
-	}
 	downloads, err := infra.Downloads(runtime.GOARCH)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range append(downloads, platform.Downloads()...) {
-		path := filepath.Join(cacheDir, "devenv", "downloads", "sha256", d.SHA256)
+		path := filepath.Join(f.o.CacheDir, "downloads", "sha256", d.SHA256)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -169,43 +182,72 @@ func fakeHost(t *testing.T) {
 	}
 }
 
-func writeKubeconfigs(t *testing.T, env state.Env) {
+// lastRun is what a run leaves in the env dir.
+var lastRun = []string{"mgmt.kubeconfig", "workload.kubeconfig", "ports.json", "ready", "logs/kind.log"}
+
+func writeLastRun(t *testing.T, env state.Env) {
 	t.Helper()
-	for _, name := range []string{"mgmt.kubeconfig", "workload.kubeconfig", "ports.json"} {
-		if err := os.WriteFile(filepath.Join(env.Dir, name), nil, 0o600); err != nil {
+	for _, name := range lastRun {
+		path := filepath.Join(env.Dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(env.Dir, "guest.log"), []byte("kind create cluster\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func wantGone(t *testing.T, env state.Env, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(env.Dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
 
-func TestUpRefusesAnEnvironmentWhoseVMIsRunning(t *testing.T) {
-	fakeHost(t)
+func TestUpRefusesAReadyEnvironmentWhoseVMIsRunning(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Running))
-	env := f.env
-	writeKubeconfigs(t, env)
-	if err := os.WriteFile(filepath.Join(env.Dir, "guest.log"), []byte("kind create cluster\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	fakeHost(t, f)
+	writeLastRun(t, f.env)
 
 	_, err := Up(t.Context(), f.o)
 
-	if err == nil || !strings.Contains(err.Error(), "environment alpha is already up") {
+	if want := "environment alpha is already up; use it, or delete it with: go run ./cmd/devenv down --name alpha"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err = %v", err)
 	}
 	if got := f.calls(t); !slices.Equal(got, []string{"--version", "machine ls --json"}) {
 		t.Errorf("smolvm calls = %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(env.Dir, "mgmt.kubeconfig")); err != nil {
-		t.Errorf("kubeconfig of the running environment: %v", err)
+	if !f.env.Ready() {
+		t.Error("forgot that the running environment is ready")
 	}
-	if log, err := os.ReadFile(filepath.Join(env.Dir, "guest.log")); err != nil || string(log) != "kind create cluster\n" {
+	if log, err := os.ReadFile(filepath.Join(f.env.Dir, "guest.log")); err != nil || string(log) != "kind create cluster\n" {
 		t.Errorf("guest.log of the running environment = %q, %v", log, err)
 	}
 }
 
-func TestUpDeletesTheVMWhenBringUpFails(t *testing.T) {
-	fakeHost(t)
+func TestUpReplacesARunningVMThatNeverBecameReady(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	fakeHost(t, f)
+	t.Setenv("FAKE_SMOLVM_FAIL", "machine start")
+
+	if _, err := Up(t.Context(), f.o); err == nil || !strings.Contains(err.Error(), `stage "VM"`) {
+		t.Errorf("err = %v", err)
+	}
+
+	if got := f.calls(t); !slices.Contains(got, "machine delete --name "+f.env.VM()+" -f") {
+		t.Errorf("smolvm calls = %q; want the VM replaced", got)
+	}
+}
+
+func TestUpExportsLogsAndDeletesTheVMWhenBringUpFails(t *testing.T) {
 	f := fakeSmolvm(t, vm(""))
+	fakeHost(t, f)
 	t.Setenv("FAKE_SMOLVM_FAIL", "machine start")
 
 	_, err := Up(t.Context(), f.o)
@@ -213,24 +255,19 @@ func TestUpDeletesTheVMWhenBringUpFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `stage "VM"`) || !strings.Contains(err.Error(), "logs: "+f.env.Dir) {
 		t.Errorf("err = %v", err)
 	}
+	if got := f.calls(t); !slices.Contains(got, "machine data-dir --name "+f.env.VM()) {
+		t.Errorf("smolvm calls = %q; want the VM's console log exported", got)
+	}
 	if got := f.machines(); len(got) > 0 {
 		t.Errorf("machines after a failed up: %+v", got)
 	}
-	if _, err := os.Stat(filepath.Join(f.env.Dir, "ports.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("ports.json: %v", err)
-	}
+	wantGone(t, f.env, "ports.json", "ready")
 }
 
 func TestUpReplacesALeftoverVMAndForgetsTheLastRun(t *testing.T) {
-	fakeHost(t)
 	f := fakeSmolvm(t, vm(smolvm.Stopped))
-	writeKubeconfigs(t, f.env)
-	if err := os.MkdirAll(filepath.Join(f.env.Dir, "logs"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(f.env.Dir, "logs", "last-run.log"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	fakeHost(t, f)
+	writeLastRun(t, f.env)
 	t.Setenv("FAKE_SMOLVM_FAIL", "machine start")
 
 	if _, err := Up(t.Context(), f.o); err == nil {
@@ -244,43 +281,132 @@ func TestUpReplacesALeftoverVMAndForgetsTheLastRun(t *testing.T) {
 	if deleted < 0 || created < deleted {
 		t.Errorf("smolvm calls = %q; want the leftover deleted before the create", got)
 	}
-	for _, name := range []string{"mgmt.kubeconfig", "workload.kubeconfig", "logs/last-run.log"} {
-		if _, err := os.Stat(filepath.Join(f.env.Dir, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s: %v", name, err)
-		}
+}
+
+func TestUpWithoutANameUsesTheOnlyEnvironment(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	fakeHost(t, f)
+	writeLastRun(t, f.env)
+	f.o.Name = ""
+
+	if _, err := Up(t.Context(), f.o); err == nil || !strings.Contains(err.Error(), "environment alpha is already up") {
+		t.Errorf("err = %v", err)
 	}
 }
 
-func TestExportLogsSkipsAnInterruptedRun(t *testing.T) {
+func TestUpNamesTheOtherRunningEnvironments(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Running))
+	fakeHost(t, f)
+	t.Setenv("FAKE_SMOLVM_FAIL", "machine start")
 	var progress bytes.Buffer
 	f.o.Progress = &progress
-	e, err := open(f.env, f.o)
-	if err != nil {
-		t.Fatal(err)
+	f.o.Name = "beta"
+
+	if _, err := Up(t.Context(), f.o); err == nil {
+		t.Fatal("no error")
 	}
-	defer e.Close()
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
 
-	e.ExportLogs(ctx)
+	if want := "] also running here, each in its own VM: alpha\n"; !strings.Contains(progress.String(), want) {
+		t.Errorf("progress = %q; want %q", progress.String(), want)
+	}
+}
 
+func TestUpChecksTheHostBeforeCreatingAnEnvironment(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	fakeHost(t, f)
+	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm 1.21.0")
+	f.o.Name = "beta"
+
+	if _, err := Up(t.Context(), f.o); err == nil || !strings.Contains(err.Error(), "want smolvm "+smolvm.Version) {
+		t.Errorf("err = %v", err)
+	}
+
+	if envs, err := state.List(f.o.StateDir); err != nil || len(envs) != 1 {
+		t.Errorf("environments = %+v, %v; want only alpha", envs, err)
+	}
+}
+
+func TestUpNeedsDevenvsSource(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	fakeHost(t, f)
+	f.o.Source = ""
+
+	if _, err := Up(t.Context(), f.o); !errors.Is(err, errNoSource) {
+		t.Errorf("err = %v", err)
+	}
 	if got := f.calls(t); len(got) > 0 {
 		t.Errorf("smolvm calls = %q", got)
 	}
-	if !strings.Contains(progress.String(), "interrupted") {
-		t.Errorf("progress = %q", progress.String())
+}
+
+func TestForgetDeletesWhatTheLastRunLeft(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	writeLastRun(t, f.env)
+	e := f.open(t)
+
+	if err := e.forget(); err != nil {
+		t.Fatal(err)
+	}
+
+	wantGone(t, f.env, lastRun...)
+	if log, err := os.ReadFile(filepath.Join(f.env.Dir, "guest.log")); err != nil || len(log) > 0 {
+		t.Errorf("guest.log = %q, %v", log, err)
 	}
 }
 
-func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
-	fakeHost(t)
-	f := fakeSmolvm(t, vm(""))
-	e, err := open(f.env, f.o)
-	if err != nil {
-		t.Fatal(err)
+func TestFailAfterAnInterruptDeletesTheVMWithoutExportingLogs(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	e := f.open(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := e.fail(ctx, fmt.Errorf("stage %q: %w", "VM", context.Canceled))
+
+	if err == nil || err.Error() != "interrupted; deleted the VM" {
+		t.Errorf("err = %v", err)
 	}
-	defer e.Close()
+	if got := f.calls(t); !slices.Equal(got, []string{"machine ls --json", "machine delete --name " + f.env.VM() + " -f"}) {
+		t.Errorf("smolvm calls = %q", got)
+	}
+}
+
+func TestFailRetainsTheVMWhenAsked(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	f.o.Retain = true
+	e := f.open(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := e.fail(ctx, context.Canceled)
+
+	if want := "kept the VM; delete it with: go run ./cmd/devenv down --name alpha"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.machines(); len(got) != 1 {
+		t.Errorf("machines = %+v", got)
+	}
+}
+
+func TestDeleteFinishesAfterAnInterrupt(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	writeLastRun(t, f.env)
+	e := f.open(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if existed, err := e.Delete(ctx, false); !existed || err != nil {
+		t.Errorf("Delete() = %v, %v", existed, err)
+	}
+
+	if got := f.machines(); len(got) > 0 {
+		t.Errorf("machines = %+v", got)
+	}
+	wantGone(t, f.env, "mgmt.kubeconfig", "workload.kubeconfig", "ports.json", "ready")
+}
+
+func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
+	f := fakeSmolvm(t, vm(""))
+	e := f.open(t)
 	unlock, err := state.WaitLock(t.Context(), e.startLock())
 	if err != nil {
 		t.Fatal(err)
@@ -302,11 +428,7 @@ func TestCreateVMWaitsWhileAnotherEnvironmentStartsItsVM(t *testing.T) {
 func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Stopped))
 	env := f.env
-	e, err := open(env, f.o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer e.Close()
+	e := f.open(t)
 
 	if err := e.createVM(t.Context(), smolvm.Stopped); err != nil {
 		t.Fatal(err)
@@ -325,121 +447,55 @@ func TestCreateVMReplacesALeftoverVMAndPublishesTheRecordedPorts(t *testing.T) {
 			t.Errorf("%q does not publish %q", got[1], publish)
 		}
 	}
-}
-
-func TestDownDeletesTheVMAndKubeconfigs(t *testing.T) {
-	f := fakeSmolvm(t, vm(smolvm.Running))
-	env := f.env
-	writeKubeconfigs(t, env)
-	var out bytes.Buffer
-
-	if err := Down(t.Context(), f.o, false, &out); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := f.machines(); len(got) > 0 {
-		t.Errorf("machines after down: %+v", got)
-	}
-	if got := f.calls(t); !slices.Contains(got, "machine delete --name "+env.VM()+" -f") {
-		t.Errorf("smolvm calls = %q", got)
-	}
-	for _, name := range []string{"mgmt.kubeconfig", "workload.kubeconfig", "ports.json"} {
-		if _, err := os.Stat(filepath.Join(env.Dir, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s: %v", name, err)
-		}
-	}
-	if _, err := os.Stat(env.Dir); err != nil {
-		t.Errorf("state dir: %v", err)
-	}
-	if out.String() != "Deleted the VM of environment alpha.\n" {
-		t.Errorf("output = %q", out.String())
-	}
-}
-
-func TestDownPurgesTheStateOfAnEnvironmentWithoutAVM(t *testing.T) {
-	f := fakeSmolvm(t, vm(""))
-	env := f.env
-	var out bytes.Buffer
-
-	if err := Down(t.Context(), f.o, true, &out); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := f.calls(t); slices.ContainsFunc(got, func(c string) bool { return strings.Contains(c, "delete") }) {
-		t.Errorf("smolvm calls = %q", got)
-	}
-	if _, err := os.Stat(env.Dir); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("state dir: %v", err)
-	}
-	if want := "Environment alpha has no VM.\nDeleted " + env.Dir + ".\n"; out.String() != want {
-		t.Errorf("output = %q, want %q", out.String(), want)
-	}
-}
-
-func TestDownFindsANamedEnvironmentWhoseStateDirIsGone(t *testing.T) {
-	f := fakeSmolvm(t, vm(smolvm.Running))
-	if err := os.RemoveAll(f.o.StateDir); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := Down(t.Context(), f.o, true, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := f.machines(); len(got) > 0 {
-		t.Errorf("machines after down: %+v", got)
-	}
-}
-
-func TestDownChecksSmolvmsVersion(t *testing.T) {
-	f := fakeSmolvm(t, vm(smolvm.Running))
-	env := f.env
-	t.Setenv("FAKE_SMOLVM_VERSION", "smolvm 1.21.0")
-
-	err := Down(t.Context(), f.o, true, &bytes.Buffer{})
-
-	if err == nil || !strings.Contains(err.Error(), "want smolvm "+smolvm.Version) {
-		t.Errorf("err = %v", err)
-	}
-	if got := f.calls(t); !slices.Equal(got, []string{"--version"}) {
-		t.Errorf("smolvm calls = %q", got)
-	}
-	if _, err := os.Stat(env.Dir); err != nil {
-		t.Errorf("state dir: %v", err)
-	}
-}
-
-func TestDownWaitsForNoOtherCommand(t *testing.T) {
-	f := fakeSmolvm(t, vm(smolvm.Running))
-	env := f.env
-	unlock, err := env.Lock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-
-	err = Down(t.Context(), f.o, true, &bytes.Buffer{})
-
-	if err == nil || !strings.Contains(err.Error(), "another devenv command is using environment alpha") {
-		t.Errorf("err = %v", err)
-	}
-	if _, err := os.Stat(env.Dir); err != nil {
-		t.Errorf("state dir: %v", err)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if unlock, err := state.WaitLock(ctx, e.startLock()); err != nil {
+		t.Errorf("createVM kept the start lock: %v", err)
+	} else {
+		unlock()
 	}
 }
 
 func TestOpenRequiresARunningVM(t *testing.T) {
 	f := fakeSmolvm(t, vm(smolvm.Stopped))
-	env := f.env
-	writeKubeconfigs(t, env)
+	writeLastRun(t, f.env)
 
 	_, err := Open(t.Context(), f.o)
 
 	if err == nil || !strings.Contains(err.Error(), "environment alpha is not running") {
 		t.Errorf("err = %v", err)
 	}
-	if _, err := env.Lock(); err != nil {
+	if _, err := f.env.Lock(); err != nil {
 		t.Errorf("Open did not release the environment: %v", err)
+	}
+}
+
+func TestOpenRequiresAReadyEnvironment(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+
+	_, err := Open(t.Context(), f.o)
+
+	if want := "environment alpha never became ready; bring it up again with: go run ./cmd/devenv up --name alpha"; err == nil || err.Error() != want {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestOpenReadsTheRecordedPorts(t *testing.T) {
+	f := fakeSmolvm(t, vm(smolvm.Running))
+	writeLastRun(t, f.env)
+	want := state.Ports{MgmtAPI: 1, WorkloadAPI: 2, Registry: 3}
+	if err := f.env.WritePorts(want); err != nil {
+		t.Fatal(err)
+	}
+
+	e, err := Open(t.Context(), f.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	if e.Ports != want {
+		t.Errorf("Ports = %+v, want %+v", e.Ports, want)
 	}
 }
 

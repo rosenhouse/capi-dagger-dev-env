@@ -23,8 +23,8 @@ import (
 
 // firstParty pushes the first-party images and bundles, installs the management packages,
 // and waits for addon-manager to install greeting-controller into the workload cluster.
-func (e *Environment) firstParty(ctx context.Context, b build) error {
-	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
+func (e *Environment) firstParty(ctx context.Context, a artifacts) error {
+	if err := e.stage("push images and bundles", func() error { return e.push(ctx, a) }); err != nil {
 		return err
 	}
 	if err := e.stage("management packages", func() error { return e.installPackages(ctx) }); err != nil {
@@ -35,7 +35,7 @@ func (e *Environment) firstParty(ctx context.Context, b build) error {
 		if err != nil {
 			return err
 		}
-		return ready.Wait(ctx, ready.Gate{
+		return e.wait(ctx, ready.Gate{
 			Name: "remote PackageInstall reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: apiAttempt,
 			Check: func(ctx context.Context) error {
 				return kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall)
@@ -62,53 +62,45 @@ var packages = []struct {
 
 func refName(pkg string) string { return pkg + ".demo.example.com" }
 
-// build is the first-party images and package manifests from one snapshot of the source.
-type build struct {
+// artifacts are the first-party images and package manifests from one snapshot of the source.
+type artifacts struct {
 	images map[string]v1.Image
 	config map[string]map[string][]byte
 }
 
 // build builds images from the current source, stamped with version, or with a digest of the source if version is empty.
-func (e *Environment) build(ctx context.Context, version string) (build, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return build{}, err
-	}
-	root, err := hostbuild.ModuleRoot(wd)
-	if err != nil {
-		return build{}, err
-	}
+func (e *Environment) build(ctx context.Context, version string) (artifacts, error) {
 	out, err := os.MkdirTemp("", "devenv-build-")
 	if err != nil {
-		return build{}, err
+		return artifacts{}, err
 	}
 	defer os.RemoveAll(out)
-	snap, err := hostbuild.Build(ctx, root, runtime.GOARCH, version, out)
+	snap, err := hostbuild.Build(ctx, e.opts.Source, runtime.GOARCH, version, out)
 	if err != nil {
-		return build{}, err
+		return artifacts{}, err
 	}
-	base, err := oci.Base(ctx, baseImage, v1.Platform{OS: "linux", Architecture: runtime.GOARCH}, filepath.Join(e.cacheDir, "images"))
+	base, err := oci.Base(ctx, baseImage, v1.Platform{OS: "linux", Architecture: runtime.GOARCH}, filepath.Join(e.opts.CacheDir, "images"))
 	if err != nil {
-		return build{}, err
+		return artifacts{}, err
 	}
-	b := build{images: map[string]v1.Image{}, config: snap.Config}
+	a := artifacts{images: map[string]v1.Image{}, config: snap.Config}
 	for _, name := range hostbuild.Commands {
 		bin, err := os.ReadFile(filepath.Join(out, name))
 		if err != nil {
-			return build{}, err
+			return artifacts{}, err
 		}
-		if b.images[name], err = oci.Image(base, name, bin); err != nil {
-			return build{}, err
+		if a.images[name], err = oci.Image(base, name, bin); err != nil {
+			return artifacts{}, err
 		}
 	}
-	return b, nil
+	return a, nil
 }
 
-// push pushes b through the registry's host port, and renders Packages that pull the bundles from inside the clusters.
-func (e *Environment) push(ctx context.Context, b build) error {
+// push pushes a through the registry's host port, and renders Packages that pull the bundles from inside the clusters.
+func (e *Environment) push(ctx context.Context, a artifacts) error {
 	host := fmt.Sprintf("localhost:%d/", e.Ports.Registry)
 	refs := map[string]string{}
-	for name, img := range b.images {
+	for name, img := range a.images {
 		digest, err := oci.Push(ctx, img, host+name)
 		if err != nil {
 			return fmt.Errorf("push %s: %w", name, err)
@@ -126,7 +118,7 @@ func (e *Environment) push(ctx context.Context, b build) error {
 		if err != nil {
 			return err
 		}
-		config, ok := b.config[p.name]
+		config, ok := a.config[p.name]
 		if !ok {
 			return fmt.Errorf("package %s has no config/%s", p.name, p.name)
 		}
@@ -146,7 +138,7 @@ func (e *Environment) push(ctx context.Context, b build) error {
 		pkgs = append(pkgs, pkg)
 		bundles[p.name] = ref
 	}
-	e.Packages, e.bundles = pkgs, bundles
+	e.packageManifests, e.bundles = pkgs, bundles
 	return nil
 }
 
@@ -178,7 +170,7 @@ subjects:
 
 func (e *Environment) installPackages(ctx context.Context) error {
 	manifests := [][]byte{[]byte(installerManifests)}
-	manifests = append(manifests, e.Packages...)
+	manifests = append(manifests, e.packageManifests...)
 	for _, p := range packages {
 		if !p.mgmt {
 			continue
@@ -196,7 +188,7 @@ func (e *Environment) installPackages(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return ready.Wait(ctx, ready.Gate{
+	return e.wait(ctx, ready.Gate{
 		Name: "PackageInstalls reconciled", Timeout: 5 * time.Minute, Interval: 3 * time.Second, Attempt: apiAttempt,
 		Check: func(ctx context.Context) error { return kube.PackageInstallsReconciled(ctx, dyn, "devenv") },
 	})
@@ -223,15 +215,15 @@ func (e *Environment) Redeploy(ctx context.Context, version string) error {
 	if !validVersion.MatchString(version) {
 		return fmt.Errorf("version %q is not letters, digits and ._+-", version)
 	}
-	var b build
-	if err := e.stage("build images", func() (err error) { b, err = e.build(ctx, version); return err }); err != nil {
+	var a artifacts
+	if err := e.stage("build images", func() (err error) { a, err = e.build(ctx, version); return err }); err != nil {
 		return err
 	}
-	if err := e.stage("push images and bundles", func() error { return e.push(ctx, b) }); err != nil {
+	if err := e.stage("push images and bundles", func() error { return e.push(ctx, a) }); err != nil {
 		return err
 	}
 	return e.stage("redeploy packages", func() error {
-		if err := platform.Reapply(ctx, e.vm, bytes.Join(e.Packages, []byte("---\n"))); err != nil {
+		if err := platform.Reapply(ctx, e.vm, bytes.Join(e.packageManifests, []byte("---\n"))); err != nil {
 			return err
 		}
 		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
@@ -243,7 +235,7 @@ func (e *Environment) Redeploy(ctx context.Context, version string) error {
 			if !p.mgmt {
 				namespace, app = WorkloadNamespace, remotePackageInstall
 			}
-			if err := ready.Wait(ctx, ready.Gate{
+			if err := e.wait(ctx, ready.Gate{
 				Name: fmt.Sprintf("App %s/%s deployed", namespace, app), Timeout: 5 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
 				Check: func(ctx context.Context) error {
 					return kube.AppDeployed(ctx, dyn, namespace, app, e.bundles[p.name])
