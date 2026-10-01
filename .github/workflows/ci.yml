@@ -32,8 +32,6 @@ jobs:
   smolvm:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      SMOLVM_IDLE_RECLAIM: "off"
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/smolvm

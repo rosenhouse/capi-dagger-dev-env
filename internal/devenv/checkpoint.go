@@ -1,7 +1,6 @@
 package devenv
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -194,14 +193,16 @@ func (e *Environment) capture(ctx context.Context, file string) error {
 
 // hostAvailableMiB returns the host's available memory, or 0 where it cannot tell.
 func hostAvailableMiB() int {
-	f, err := os.Open("/proc/meminfo")
+	meminfo, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		if rest, ok := strings.CutPrefix(s.Text(), "MemAvailable:"); ok {
+	return memAvailableMiB(string(meminfo))
+}
+
+func memAvailableMiB(meminfo string) int {
+	for _, line := range strings.Split(meminfo, "\n") {
+		if rest, ok := strings.CutPrefix(line, "MemAvailable:"); ok {
 			kib, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(rest), " kB"))
 			if err != nil {
 				return 0

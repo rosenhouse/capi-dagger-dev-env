@@ -31,7 +31,7 @@ func TestMachineLifecycle(t *testing.T) {
 	deleteLater(t, c, source)
 	must(t, c.Create(ctx, source, smolvm.MachineConfig{CPUs: 1, MemoryMiB: 512, StorageGiB: 2, OverlayGiB: 1,
 		Ports: []smolvm.Port{{Host: ports[0], Guest: 8080}}}))
-	must(t, c.Start(ctx, source, smolvm.StartOptions{Branchable: true}))
+	must(t, c.Start(ctx, source, smolvm.StartOptions{Branchable: true, NoIdleReclaim: true}))
 
 	if out, err := c.Run(ctx, source, "echo hello\nuname -s", smolvm.ExecOptions{}); err != nil || out != "hello\nLinux\n" {
 		t.Fatalf("Run() = %q, %v", out, err)
@@ -87,7 +87,10 @@ func TestMachineLifecycle(t *testing.T) {
 	must(t, c.CreateFromCheckpoint(ctx, restored, file))
 	wantState(t, c, restored, smolvm.Created)
 	must(t, c.RebindPorts(ctx, restored, []smolvm.Port{{Host: ports[0], Guest: 8080}}, []smolvm.Port{{Host: ports[1], Guest: 8080}}))
-	must(t, c.Start(ctx, restored, smolvm.StartOptions{}))
+	must(t, c.Start(ctx, restored, smolvm.StartOptions{NoIdleReclaim: true}))
+	if out, err := c.Run(ctx, restored, "cat /dev/shm/msg", smolvm.ExecOptions{}); err != nil || out != served {
+		t.Errorf("Run() in the restored machine = %q, %v", out, err)
+	}
 	wantServed(t, ports[1], served)
 
 	deleteLater(t, c, branch)

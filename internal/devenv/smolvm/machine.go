@@ -86,6 +86,14 @@ func AgentTimedOut(err error) bool {
 	return errors.As(err, &exit) && strings.Contains(exit.Stderr, "agent did not respond to ping within timeout")
 }
 
+// AgentUnreachable reports whether smolvm ran nothing because the guest's agent did not answer its ping within 3 s,
+// which a busy guest can miss. smolvm then calls the machine not running.
+func AgentUnreachable(err error) bool {
+	var exit *ExitError
+	return errors.As(err, &exit) && strings.Contains(exit.Stderr, "agent operation failed: connect: machine '") &&
+		strings.Contains(exit.Stderr, "' is not running.")
+}
+
 func (c CLI) Stop(ctx context.Context, name string) error {
 	return c.do(ctx, "machine", "stop", "--name", name)
 }

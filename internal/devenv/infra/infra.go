@@ -88,19 +88,43 @@ var guestEnv = []string{"HOME=/root", "PATH=/usr/local/sbin:/usr/local/bin:/usr/
 
 // Run runs script in the guest.
 func (v *VM) Run(ctx context.Context, script string) error {
-	_, err := v.CLI.Run(ctx, v.Name, script, smolvm.ExecOptions{Env: guestEnv, Stdout: v.Log, Stderr: v.Log})
+	_, err := v.run(ctx, script, func() smolvm.ExecOptions { return smolvm.ExecOptions{Env: guestEnv, Stdout: v.Log, Stderr: v.Log} })
 	return err
 }
 
 // Output runs script in the guest and returns its stdout, which it leaves out of the log.
 func (v *VM) Output(ctx context.Context, script string) (string, error) {
-	return v.CLI.Run(ctx, v.Name, script, smolvm.ExecOptions{Env: guestEnv, Stderr: v.Log})
+	return v.run(ctx, script, func() smolvm.ExecOptions { return smolvm.ExecOptions{Env: guestEnv, Stderr: v.Log} })
 }
 
 // Pipe runs script in the guest with stdin.
 func (v *VM) Pipe(ctx context.Context, script string, stdin []byte) error {
-	_, err := v.CLI.Run(ctx, v.Name, script, smolvm.ExecOptions{Env: guestEnv, Stdin: bytes.NewReader(stdin), Stdout: v.Log, Stderr: v.Log})
+	_, err := v.run(ctx, script, func() smolvm.ExecOptions {
+		return smolvm.ExecOptions{Env: guestEnv, Stdin: bytes.NewReader(stdin), Stdout: v.Log, Stderr: v.Log}
+	})
 	return err
+}
+
+// A guest that has just resumed from a checkpoint can be too busy to answer smolvm for a while.
+var (
+	unreachableWait     = time.Minute
+	unreachableInterval = 2 * time.Second
+)
+
+// run runs script with options from opts, again while smolvm cannot reach the guest, for up to unreachableWait.
+func (v *VM) run(ctx context.Context, script string, opts func() smolvm.ExecOptions) (string, error) {
+	deadline := time.Now().Add(unreachableWait)
+	for {
+		out, err := v.CLI.Run(ctx, v.Name, script, opts())
+		if !smolvm.AgentUnreachable(err) || time.Now().After(deadline) {
+			return out, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(unreachableInterval):
+		}
+	}
 }
 
 // WriteFile writes content to path in the guest.

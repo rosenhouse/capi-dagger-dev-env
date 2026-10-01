@@ -1,0 +1,52 @@
+name: probe
+on:
+  pull_request:
+    branches: [smol]
+defaults:
+  run:
+    shell: bash
+jobs:
+  restore-exec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/smolvm
+        with:
+          version: 1.22.0
+          sha256: 00d2f057c963ff950846d4059af87bdddb7edf707750cdab863cb0879d6b339e
+      - name: exec right after a restored start
+        run: |
+          T=$RUNNER_TEMP
+          variant() { # name proxy remove
+            local n=$1 proxy=$2 remove=$3 src=probe-src-$1 dst=probe-dst-$1 start=(machine start --proxy "")
+            [ "$proxy" = yes ] || start=(machine start)
+            smolvm machine create --name "$src" --net --net-backend virtio-net --cpus 1 --mem 512 --storage 2 --overlay 1 -p 18080:8080
+            SMOLVM_IDLE_RECLAIM=off smolvm "${start[@]}" --name "$src" --branchable
+            smolvm machine exec --name "$src" -- sh -c 'echo hi >/dev/shm/msg'
+            smolvm machine checkpoint --name "$src" -o "$T/$n.checkpoint"
+            smolvm machine delete -f --name "$src"
+            smolvm machine create --name "$dst" --from "$T/$n.checkpoint"
+            if [ "$remove" = yes ]; then
+              smolvm machine update --name "$dst" --remove-port 18080:8080 -p 28080:8080
+            else
+              smolvm machine update --name "$dst" -p 28080:8080
+            fi
+            SMOLVM_IDLE_RECLAIM=off smolvm "${start[@]}" --name "$dst"
+            for i in 1 2 3; do
+              if smolvm machine exec --name "$dst" -- cat /dev/shm/msg; then echo "| $n | exec $i ok |" >>"$GITHUB_STEP_SUMMARY"; else echo "| $n | exec $i FAILED |" >>"$GITHUB_STEP_SUMMARY"; fi
+              sleep 2
+            done
+            smolvm machine ls
+            ls -la "$(smolvm machine data-dir --name "$dst")" || true
+            pgrep -af _boot-vm || true
+            tail -20 "$(smolvm machine data-dir --name "$dst")/agent-console.log" || true
+            smolvm machine delete -f --name "$dst"
+          }
+          echo "| variant | result |" >>"$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >>"$GITHUB_STEP_SUMMARY"
+          variant spike no no
+          variant ours yes yes
+          variant proxy yes no
+          variant remove no yes
+      - run: DEVENV_SMOLVM_TESTS=1 go test -v -run TestMachineLifecycle ./internal/devenv/smolvm/

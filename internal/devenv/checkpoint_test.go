@@ -391,6 +391,18 @@ func TestCaptureZeroFillsTheGuestAndDeletesTheVM(t *testing.T) {
 	}
 }
 
+func TestMemAvailableMiB(t *testing.T) {
+	for meminfo, want := range map[string]int{
+		"MemTotal:       16374652 kB\nMemFree:         1041804 kB\nMemAvailable:   12582912 kB\n": 12288,
+		"MemTotal:       16374652 kB\n": 0,
+		"MemAvailable:   lots kB\n":     0,
+	} {
+		if got := memAvailableMiB(meminfo); got != want {
+			t.Errorf("memAvailableMiB(%q) = %d; want %d", meminfo, got, want)
+		}
+	}
+}
+
 func wantStartLockFree(t *testing.T, e *Environment) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
