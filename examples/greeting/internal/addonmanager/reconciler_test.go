@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/addonmanager"
+	"github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/internal/addonmanager"
 )
 
 func TestInstallsPackageIntoInitializedCluster(t *testing.T) {

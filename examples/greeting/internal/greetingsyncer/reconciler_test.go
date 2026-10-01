@@ -16,8 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	demov1 "github.com/rosenhouse/capi-dagger-dev-env/api/v1alpha1"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/greetingsyncer"
+	demov1 "github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/api/v1alpha1"
+	"github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/internal/greetingsyncer"
 )
 
 func TestCopiesGreetingToItsCluster(t *testing.T) {

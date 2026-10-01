@@ -15,8 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	demov1 "github.com/rosenhouse/capi-dagger-dev-env/api/v1alpha1"
-	"github.com/rosenhouse/capi-dagger-dev-env/internal/greetingcontroller"
+	demov1 "github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/api/v1alpha1"
+	"github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/internal/greetingcontroller"
 )
 
 func TestDeploysHelloBehindProxy(t *testing.T) {

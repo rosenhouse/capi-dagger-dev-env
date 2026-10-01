@@ -45,7 +45,7 @@ container system start
 
 ## Checklist
 
-Run these from a clean checkout and report the results on #13.
+Run these from `examples/greeting` in a clean checkout and report the results on #13.
 
 1. `time go run ./cmd/devenv test --name mac` exits 0.
 2. Run it again and note both times; the second should be faster.

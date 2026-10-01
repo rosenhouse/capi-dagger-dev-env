@@ -14,7 +14,11 @@ On Apple Silicon macOS, see [docs/macos.md](docs/macos.md).
 
 ## Use
 
+[`examples/greeting`](examples/greeting) is a set of example controllers in their own module.
+Run its environment from that directory:
+
 ```sh
+cd examples/greeting
 go run ./cmd/devenv up           # holds the environment until Ctrl-C
 go run ./cmd/devenv test         # brings up an environment, verifies it, and tears it down
 go run ./cmd/devenv redeploy     # rebuilds from the current source into the running environment
@@ -33,7 +37,8 @@ A failure names the stage and the readiness gate that failed.
 
 ## Use with your own controllers
 
-Write a `main` package in your module that passes your commands and packages to `cli.Main`:
+Add the tool to your module with `go get github.com/rosenhouse/capi-dagger-dev-env`.
+Then write a `main` package that passes your commands and packages to `cli.Main`:
 
 ```go
 func main() {
@@ -48,4 +53,4 @@ func main() {
 
 Run it from your module, which devenv builds from.
 devenv stamps each build's version into a command's `var version string` in package `main`.
-See [`devenv.Config`](devenv/config.go) for the hooks, and [`cmd/devenv`](cmd/devenv/main.go) for the Greeting example's configuration.
+See [`devenv.Config`](devenv/config.go) for the hooks, and [`examples/greeting/cmd/devenv`](examples/greeting/cmd/devenv/main.go) for the Greeting example's configuration.

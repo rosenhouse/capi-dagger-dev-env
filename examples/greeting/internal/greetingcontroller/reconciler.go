@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	demov1 "github.com/rosenhouse/capi-dagger-dev-env/api/v1alpha1"
+	demov1 "github.com/rosenhouse/capi-dagger-dev-env/examples/greeting/api/v1alpha1"
 )
 
 //go:generate go tool controller-gen rbac:roleName=greeting-controller paths=./... output:rbac:dir=../../config/greeting-controller
