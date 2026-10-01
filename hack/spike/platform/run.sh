@@ -59,6 +59,7 @@ boot() {
 	metric "smolvm" "$(smolvm --version)"
 	metric "host THP shmem_enabled" "$(cat /sys/kernel/mm/transparent_hugepage/shmem_enabled)"
 	metric "host memory total, swap total" "$(free -m | awk '/^Mem:/ { m = $2 } /^Swap:/ { s = $2 } END { print m " MiB, " s " MiB" }')"
+	metric "host systemd-oomd" "$(systemctl is-active systemd-oomd || true)"
 	now >"$OUT/bringup-at"
 	smolvm machine create --name $PLAT --net --net-backend virtio-net --cpus 4 --mem 12288 --storage 40 --overlay 10
 	timed "first start of the bare VM (--branchable)" smolvm machine start --name $PLAT --branchable
@@ -145,8 +146,38 @@ capture() {
 	metric "state of $PLAT after capture" "$(state $PLAT)"
 }
 
+vmm_rss() { # machine: the VMM's Rss in MiB
+	local pid
+	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
+	sudo awk '/^Rss:/ { printf "%d", $2 / 1024 }' "/proc/$pid/smaps_rollup"
+}
+
+host_avail() { free -m | awk '/^Mem:/ { print $7 }'; }
+guest_avail() { smolvm machine exec --name "$1" -- awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo; }
+
+# zero_fill drops the guest's page cache, then writes zeros into guest tmpfs in 512 MiB steps,
+# so that stale pages become zero pages, which capture skips.
+# Each step can grow the VMM's memfd by 512 MiB, so it stops while the host still has 4 GiB available.
+# Filling all free guest RAM at once got the runner killed.
+zero_fill() {
+	local i=0 rss0 t0
+	smolvm machine exec --name $PLAT -- sh -c 'sync; echo 3 >/proc/sys/vm/drop_caches; mkdir -p /mnt/zero; mount -t tmpfs -o size=100% zero /mnt/zero'
+	vmm_memory $PLAT "after guest drop_caches"
+	rss0=$(vmm_rss $PLAT)
+	t0=$(now)
+	while (($(host_avail) > 4096 && $(guest_avail $PLAT) > 2048)); do
+		smolvm machine exec --name $PLAT -- dd if=/dev/zero of=/mnt/zero/$i bs=1M count=512
+		i=$((i + 1))
+		echo "zero-filled $((i * 512)) MiB in $(since "$t0"): host available $(host_avail) MiB, VMM Rss $(vmm_rss $PLAT) MiB," \
+			"$(head -1 /proc/pressure/memory)"
+	done
+	metric "zero-filled guest memory" "$((i * 512)) MiB in $(since "$t0"), VMM Rss grew $(($(vmm_rss $PLAT) - rss0)) MiB"
+	metric "host, guest MemAvailable when the zero fill stopped" "$(host_avail) MiB, $(guest_avail $PLAT) MiB"
+	smolvm machine exec --name $PLAT -- sh -c 'rm -f /mnt/zero/*; umount /mnt/zero'
+}
+
 zeroed_capture() {
-	guest $PLAT zero-fill
+	zero_fill
 	capture zeroed
 }
 
@@ -172,12 +203,13 @@ restore() {
 	echo $! >"$OUT/monitor.pid"
 }
 
-# monitor: every 5 s, host memory, and each VMM's CPU seconds and Pss.
+# monitor: every 5 s, host memory and memory pressure, and each VMM's CPU seconds and Pss.
 monitor() {
 	set +e
 	local m
 	while :; do
-		printf '%s %s' "$(date +%s)" "$(free -m | awk '/^Mem:/ { m = "used=" $3 " avail=" $7 } /^Swap:/ { s = " swap=" $3 } END { print m s }')"
+		printf '%s %s %s' "$(date +%T)" "$(free -m | awk '/^Mem:/ { m = "used=" $3 " avail=" $7 } /^Swap:/ { s = " swap=" $3 } END { print m s }')" \
+			"$(awk '/^some/ { print "psi-" $2 }' /proc/pressure/memory)"
 		for m in $(smolvm machine ls -q); do
 			printf ' %s=%s/%sMiB' "$m" "$(vmm_stat "$m" | cut -d' ' -f3)" "$(vmm_pss "$m")"
 		done
@@ -235,10 +267,12 @@ gate() {
 
 # gates <env> <label>: waits for every gate in parallel, timing each from the branch.
 gates() {
-	local env=$1 t0 m w r p pids=() rc=0
+	local env=$1 t0 m w r p pids=() rc=0 tail_pid
 	read -r m w r < <(ports "$env")
 	t0=$(now)
 	if [ "$2" = "after branch" ]; then t0=$(cat "$OUT/$env-branched-at"); fi
+	tail -n0 -f "$OUT/monitor.log" &
+	tail_pid=$!
 	gate "$env: mgmt /readyz from the host ($2)" "$t0" readyz "$m" &
 	pids+=($!)
 	gate "$env: work /readyz from the host ($2)" "$t0" readyz "$w" &
@@ -253,6 +287,7 @@ gates() {
 	pids+=($!)
 	for p in "${pids[@]}"; do wait "$p" || rc=1; done
 	metric "$env: all gates ($2)" "$(since "$t0")"
+	kill $tail_pid
 	return $rc
 }
 

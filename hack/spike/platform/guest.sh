@@ -244,21 +244,6 @@ pre_capture() {
 	fstrim -v / || true
 }
 
-# Zeroes free guest RAM, so that stale page cache does not reach the checkpoint: capture skips zero pages.
-zero_fill() {
-	sync
-	echo 3 >/proc/sys/vm/drop_caches
-	mkdir -p /mnt/zero
-	mount -t tmpfs -o size=100% zero /mnt/zero
-	mib=$(($(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo) - 1536))
-	t0=$(now)
-	dd if=/dev/zero of=/mnt/zero/fill bs=1M count=$mib 2>/dev/null
-	metric "zero-filled guest memory" "$mib MiB in $(since "$t0")"
-	rm /mnt/zero/fill
-	umount /mnt/zero
-	free -m
-}
-
 # Counters that show churn after a restore or branch: container restarts, leader changes,
 # nodes going NotReady, and Machines replaced by MachineHealthCheck remediation.
 churn() { # label
@@ -356,7 +341,6 @@ workload-wait) workload_wait ;;
 forward) forward ;;
 resources) resources "$2" ;;
 pre-capture) pre_capture ;;
-zero-fill) zero_fill ;;
 churn) churn "$2" ;;
 oom-lines) oom_lines ;;
 cpu-probe) cpu_probe "$2" ;;
