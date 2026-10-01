@@ -4,7 +4,7 @@ description: >
   It writes the CPU, the checkpoint's key and how the restore went to $RUNNER_TEMP/platform.md.
 inputs:
   save-on-miss:
-    description: On a miss, save a checkpoint in this job, without publishing it to the cache.
+    description: On a miss, save a checkpoint in this job, without publishing it.
     default: "false"
 outputs:
   hit:
@@ -40,7 +40,7 @@ runs:
         else
           echo "| Platform cache | miss after $seconds s |" >>"$RUNNER_TEMP/platform.md"
         fi
-    # Pull requests cannot publish a checkpoint, so this lets them start warm before one is on smol.
+    # On a miss, a job that saves its own checkpoint measures a cold start followed by warm ones.
     - name: devenv platform save
       if: steps.restore.outputs.cache-hit != 'true' && inputs.save-on-miss == 'true'
       shell: bash

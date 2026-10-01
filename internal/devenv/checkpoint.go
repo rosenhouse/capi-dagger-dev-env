@@ -98,14 +98,14 @@ func (c platformCache) lookup(key string) (string, error) {
 	return path, nil
 }
 
-// save has capture write a checkpoint to a temporary file, then makes it in.key()'s entry.
+// save has capture write a checkpoint to a temporary file, then makes that file the entry for in's key.
 func (c platformCache) save(in platformInputs, capture func(file string) error) (string, error) {
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return "", err
 	}
 	key := in.key()
 	tmp := filepath.Join(c.dir, "."+key+".checkpoint")
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeIfExists(tmp); err != nil {
 		return "", err
 	}
 	if err := capture(tmp); err != nil {
