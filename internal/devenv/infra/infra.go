@@ -68,20 +68,21 @@ func Start(ctx context.Context, c *dagger.Client, env string) (*Infra, error) {
 			// Each session acts on a fresh daemon, so its execs must not reuse cached results.
 			WithEnvVariable("DEVENV_SESSION", time.Now().Format(time.RFC3339Nano)),
 	}
-	fsType, err := i.run(ctx, "stat -fc %T /sys/fs/cgroup")
+	magic, err := i.run(ctx, "stat -fc %t /sys/fs/cgroup")
 	if err != nil {
 		return nil, err
 	}
-	if err := requireCgroupV2(fsType); err != nil {
+	if err := requireCgroupV2(magic); err != nil {
 		return nil, err
 	}
 	_, err = i.run(ctx, `docker rm -f $(docker ps -aq) 2>/dev/null; docker network prune -f`)
 	return i, err
 }
 
-func requireCgroupV2(fsType string) error {
-	if fsType = strings.TrimSpace(fsType); fsType != "cgroup2fs" {
-		return fmt.Errorf("the Dagger engine's host mounts %s at /sys/fs/cgroup; Kind inside Dagger needs cgroup v2", fsType)
+// requireCgroupV2 checks the filesystem magic number of /sys/fs/cgroup, which BusyBox and GNU stat both print.
+func requireCgroupV2(magic string) error {
+	if magic = strings.TrimSpace(magic); magic != "63677270" {
+		return fmt.Errorf("the Dagger engine's host does not mount cgroup2 at /sys/fs/cgroup (filesystem magic 0x%s); Kind inside Dagger needs cgroup v2", magic)
 	}
 	return nil
 }
