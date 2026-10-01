@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"dagger.io/dagger"
@@ -41,10 +44,12 @@ type Environment struct {
 	// Packages are rendered Package resources for the first-party bundles in the session registry.
 	Packages [][]byte
 
-	opts    Options
-	start   time.Time
-	infra   *infra.Infra
-	closers []func() error
+	opts     Options
+	start    time.Time
+	infra    *infra.Infra
+	registry *infra.Registry
+	mirrors  infra.Mirrors
+	closers  []func() error
 }
 
 // Up brings up an environment and waits for its readiness gates.
@@ -92,17 +97,19 @@ func (e *Environment) bringUp(ctx context.Context) error {
 	if err := e.stage("preflight", func() error { return infra.Preflight(ctx, c) }); err != nil {
 		return err
 	}
-	var reg *infra.Registry
-	if err := e.stage("registry", func() (err error) {
-		reg, err = infra.StartRegistry(ctx, c)
+	if err := e.stage("registry and mirrors", func() (err error) {
+		if e.registry, err = infra.StartRegistry(ctx, c); err != nil {
+			return err
+		}
+		e.mirrors, err = infra.StartMirrors(ctx, c)
 		return err
 	}); err != nil {
 		return err
 	}
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.managementCluster(gctx, c, reg.Host) })
+	g.Go(func() error { return e.managementCluster(gctx, c) })
 	g.Go(func() error {
-		return e.stage("images and bundles", func() error { return e.publishPackages(gctx, c, reg) })
+		return e.stage("images and bundles", func() error { return e.publishPackages(gctx, c, e.registry) })
 	})
 	if err := g.Wait(); err != nil {
 		return err
@@ -179,9 +186,9 @@ func (e *Environment) workloadAPI(ctx context.Context) error {
 	})
 }
 
-func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client, registryHost string) error {
+func (e *Environment) managementCluster(ctx context.Context, c *dagger.Client) error {
 	if err := e.stage("docker daemon", func() (err error) {
-		e.infra, err = infra.Start(ctx, c, e.ID, registryHost)
+		e.infra, err = infra.Start(ctx, c, e.ID, e.registry.Host, e.mirrors)
 		return err
 	}); err != nil {
 		return err
@@ -350,13 +357,34 @@ func (e *Environment) Verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	catalogs := map[string]string{}
+	for name, host := range e.mirrors {
+		if catalogs[name], err = e.registry.Catalog(ctx, host); err != nil {
+			return err
+		}
+	}
 	return errors.Join(
+		unusedMirrors(catalogs),
 		kube.NodesReady(ctx, cs),
 		kube.NodesReady(ctx, workload),
 		kube.PackageInstallsReconciled(ctx, dyn, "devenv"),
 		kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster),
 		kube.PackageInstallReconciled(ctx, dyn, WorkloadNamespace, remotePackageInstall),
 	)
+}
+
+// unusedMirrors names the mirrors whose catalogs are empty.
+func unusedMirrors(catalogs map[string]string) error {
+	var unused []string
+	for _, name := range slices.Sorted(maps.Keys(catalogs)) {
+		if strings.TrimSpace(catalogs[name]) == "" {
+			unused = append(unused, name)
+		}
+	}
+	if len(unused) > 0 {
+		return fmt.Errorf("mirrors served nothing: %s", strings.Join(unused, ", "))
+	}
+	return nil
 }
 
 // Close ends the Dagger session, which stops every service in the environment.

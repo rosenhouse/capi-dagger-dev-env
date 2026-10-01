@@ -94,22 +94,29 @@ func requireCgroupV2(magic string) error {
 }
 
 // Start starts the environment's Docker daemon and removes containers and volumes left by an earlier session.
-// Kind nodes pull from registryHost over plain HTTP.
-func Start(ctx context.Context, c *dagger.Client, envID, registryHost string) (*Infra, error) {
+// The daemon and its nodes pull from registryHost over plain HTTP, and from upstream registries through mirrors.
+func Start(ctx context.Context, c *dagger.Client, envID, registryHost string, mirrors Mirrors) (*Infra, error) {
 	platform, err := c.DefaultPlatform(ctx)
 	if err != nil {
 		return nil, err
 	}
 	arch := strings.TrimPrefix(string(platform), "linux/")
 
-	dind, err := c.Container().From(dindImage).
+	daemon := c.Container().From(dindImage).
 		WithEnvVariable("DOCKER_TLS_CERTDIR", "").
-		WithNewFile(ContainerdCertsDir+"/"+registryHost+"/hosts.toml",
-			fmt.Sprintf("server = %[1]q\n\n[host.%[1]q]\n  capabilities = [\"pull\", \"resolve\"]\n", "http://"+registryHost)).
+		WithNewFile(ContainerdCertsDir+"/"+registryHost+"/hosts.toml", hostsTOML("http://"+registryHost, registryHost))
+	for name, mirror := range mirrors {
+		daemon = daemon.WithNewFile(ContainerdCertsDir+"/"+name+"/hosts.toml", hostsTOML(Upstreams[name], mirror))
+	}
+	dind, err := daemon.
 		WithMountedCache("/var/lib/docker", c.CacheVolume("devenv-"+envID+"-docker"),
 			dagger.ContainerWithMountedCacheOpts{Sharing: dagger.CacheSharingModeLocked}).
 		WithExposedPort(2375).
-		AsService(dagger.ContainerAsServiceOpts{UseEntrypoint: true, InsecureRootCapabilities: true, Args: []string{"--tls=false"}}).
+		AsService(dagger.ContainerAsServiceOpts{UseEntrypoint: true, InsecureRootCapabilities: true, Args: []string{
+			"--tls=false",
+			"--registry-mirror=http://" + mirrors["docker.io"],
+			"--insecure-registry=" + mirrors["docker.io"],
+		}}).
 		Start(ctx)
 	if err != nil {
 		return nil, err

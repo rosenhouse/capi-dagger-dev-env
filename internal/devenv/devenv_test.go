@@ -107,3 +107,13 @@ func placeholders(t *testing.T, dir string) []string {
 	}
 	return slices.Sorted(maps.Keys(found))
 }
+
+func TestUnusedMirrorsNamesMirrorsWithEmptyCatalogs(t *testing.T) {
+	err := unusedMirrors(map[string]string{"docker.io": "library/busybox\n", "quay.io": "", "ghcr.io": "\n"})
+	if err == nil || err.Error() != "mirrors served nothing: ghcr.io, quay.io" {
+		t.Errorf("err = %v", err)
+	}
+	if err := unusedMirrors(map[string]string{"docker.io": "library/busybox\n"}); err != nil {
+		t.Errorf("err = %v", err)
+	}
+}
