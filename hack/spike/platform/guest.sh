@@ -199,7 +199,8 @@ workload() {
 		print "            hostPath: /etc/devenv/certs.d"
 	}' /root/clusterclass-quick-start.yaml >/root/clusterclass.yaml
 	test "$(grep -c 'hostPath: /etc/devenv/certs.d' /root/clusterclass.yaml)" = 2
-	kubectl apply --server-side -n default -f /root/clusterclass.yaml
+	# cert-manager can inject the webhooks' CA after clusterctl init returns.
+	retry 120 kubectl apply --server-side -n default -f /root/clusterclass.yaml
 	sed "s|'\${DOCKER_POD_CIDRS},\${DOCKER_POD_IPV6_CIDRS}'|192.168.0.0/16|" /root/kindnet.yaml >/root/kindnet-rendered.yaml
 	grep -q 'value: 192.168.0.0/16' /root/kindnet-rendered.yaml
 	kubectl create configmap kindnet -n default --from-file=kindnet.yaml=/root/kindnet-rendered.yaml --dry-run=client -o yaml |

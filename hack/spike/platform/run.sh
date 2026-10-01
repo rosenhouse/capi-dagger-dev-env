@@ -108,8 +108,8 @@ resources() { # label machine-to-inspect
 }
 
 host_meminfo() { # label
-	metric "host MemAvailable, Shmem, AnonPages, Mapped, Cached, Dirty ($1)" \
-		"$(awk '/^(MemAvailable|Shmem|AnonPages|Mapped|Cached|Dirty):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' /proc/meminfo)"
+	metric "host MemAvailable, Cached, Dirty, AnonPages, Mapped, Shmem ($1)" \
+		"$(awk '/^(MemAvailable|Cached|Dirty|AnonPages|Mapped|Shmem):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' /proc/meminfo)"
 }
 
 vmm_memory() { # machine label
