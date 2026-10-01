@@ -49,7 +49,7 @@ Run these from a clean checkout and report the results on #13.
 
 1. `time go run ./cmd/devenv test --name mac` exits 0.
 2. Run it again and note both times; the second should be faster.
-3. `go run ./cmd/devenv up --name mac`, then in another terminal:
+3. `go run ./cmd/devenv up --name mac`. Once it prints `Environment mac is up.`, in another terminal:
    1. `go run ./cmd/devenv status` shows `mac` running.
    2. `go run ./cmd/devenv kubeconfig --cluster workload > /tmp/workload.kubeconfig`, then `export KUBECONFIG=/tmp/workload.kubeconfig`.
    3. `kubectl get nodes` lists Ready nodes.
