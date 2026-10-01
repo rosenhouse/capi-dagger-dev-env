@@ -25,17 +25,18 @@ name=$(ls .devenv | head -1)
 note "platform save --force while $name is up"
 free -m | quote
 (sleep 150; { echo "status during the save:"; "$D" status; free -m; } >"$OUT/during-save.txt" 2>&1) &
+sampler=$!
 timed save-while-up "$D" platform save --force
-wait
+wait "$sampler"
 quote <"$OUT/during-save.txt"
 timed after-save-pods kubectl --kubeconfig ".devenv/$name/mgmt.kubeconfig" get pods -A
 timed after-save-redeploy go run ./cmd/devenv redeploy
 leftovers
 
 note "Stop and start the restored VM"
-timed stop smolvm machine stop --name "$vm"
-timed start smolvm machine start --name "$vm"
-timed stopped-status go run ./cmd/devenv status
+timed stop timeout 120 smolvm machine stop --name "$vm"
+timed start timeout 300 smolvm machine start --name "$vm"
+timed stopped-status timeout 60 go run ./cmd/devenv status
 timed stopped-kubectl timeout 60 kubectl --request-timeout=10s --kubeconfig ".devenv/$name/mgmt.kubeconfig" get nodes
 timed stopped-redeploy timeout 300 go run ./cmd/devenv redeploy
 timed stopped-up timeout 900 go run ./cmd/devenv up

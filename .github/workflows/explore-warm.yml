@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [disk]
+        script: [lifecycle]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
