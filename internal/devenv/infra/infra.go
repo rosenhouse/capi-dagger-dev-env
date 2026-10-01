@@ -38,7 +38,7 @@ const (
 )
 
 // machineConfig sizes each environment's VM. Two fit on a 16 GB host.
-var machineConfig = smolvm.MachineConfig{CPUs: 4, MemoryMiB: 6144, StorageGiB: 40, OverlayGiB: 10}
+var machineConfig = smolvm.MachineConfig{CPUs: 4, MemoryMiB: 5120, StorageGiB: 40, OverlayGiB: 10}
 
 // VM is an environment's machine.
 type VM struct {

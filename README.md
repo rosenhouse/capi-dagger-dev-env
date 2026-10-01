@@ -9,7 +9,7 @@ A Cluster API development environment. Each environment runs in its own [smolvm]
   `curl -fsSL https://raw.githubusercontent.com/smol-machines/smolvm/v1.22.0/scripts/install.sh | bash -s -- --version 1.22.0`
 - On Linux, read and write access to `/dev/kvm`. A cloud VM needs nested virtualization.
 - On macOS, Apple Silicon. See [docs/macos.md](docs/macos.md).
-- 6 GiB of memory per environment
+- 5 GiB of memory per environment
 
 ## Use
 
