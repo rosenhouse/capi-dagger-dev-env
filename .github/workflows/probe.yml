@@ -28,6 +28,7 @@ jobs:
             echo "--- agent-startup-error.log"; cat "$d/agent-startup-error.log" || true
             echo "--- agent-console.log"; tail -c 12000 "$d/agent-console.log" || true
             echo "--- host dmesg"; sudo dmesg | tail -30
+            echo "--- start and boot output"; tail -c 20000 "$RUNNER_TEMP/start.log"
             echo
           }
           variant() { # name proxy remove
@@ -43,7 +44,7 @@ jobs:
               smolvm machine update --name "$dst" -p 26443:6443 -p 27443:7443 -p 25000:5000
             fi
             t0=$SECONDS
-            SMOLVM_BOOT_DEBUG=1 RUST_LOG=smolvm=debug SMOLVM_IDLE_RECLAIM=off smolvm "${start[@]}" --name "$dst" 2>&1 | tail -60
+            SMOLVM_BOOT_DEBUG=1 RUST_LOG=smolvm=debug SMOLVM_IDLE_RECLAIM=off smolvm "${start[@]}" --name "$dst" >"$RUNNER_TEMP/start.log" 2>&1
             echo "start took $((SECONDS - t0)) s"
             ok=no
             sleep 2; smolvm machine ls
