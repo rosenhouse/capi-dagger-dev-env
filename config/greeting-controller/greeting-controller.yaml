@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: greeting-controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: greeting-controller
+  namespace: greeting-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: greeting-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: greeting-controller
+subjects:
+- kind: ServiceAccount
+  name: greeting-controller
+  namespace: greeting-controller
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workload-images
+  namespace: greeting-controller
+data:
+  helloImage: hello
+  proxyImage: docker.io/library/nginx:1.29-alpine
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: greeting-controller
+  namespace: greeting-controller
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: greeting-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: greeting-controller
+    spec:
+      serviceAccountName: greeting-controller
+      containers:
+      - name: manager
+        image: greeting-controller
+        env:
+        - name: HELLO_IMAGE
+          valueFrom:
+            configMapKeyRef:
+              name: workload-images
+              key: helloImage
+        - name: PROXY_IMAGE
+          valueFrom:
+            configMapKeyRef:
+              name: workload-images
+              key: proxyImage
+---
+# Lets kbld resolve and relocate image references held in ConfigMap data.
+apiVersion: kbld.k14s.io/v1alpha1
+kind: Config
+searchRules:
+- keyMatcher:
+    name: helloImage
+- keyMatcher:
+    name: proxyImage
