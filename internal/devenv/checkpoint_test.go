@@ -258,6 +258,33 @@ func TestUpStartsColdWithoutACheckpointOrWhenAsked(t *testing.T) {
 	}
 }
 
+func TestPlatformLetsTheBuildStartBeforeARestoreAndAfterAColdBoot(t *testing.T) {
+	for _, cold := range []bool{false, true} {
+		t.Run(fmt.Sprint(cold), func(t *testing.T) {
+			f := fakeSmolvm(t, vm(""))
+			fakeHost(t, f)
+			fakeCheckpoint(t, f)
+			t.Setenv("FAKE_SMOLVM_FAIL", "machine exec")
+			f.o.Cold = cold
+			e := f.open(t)
+			var before []string
+			called := false
+
+			_ = e.platform(t.Context(), "", func() {
+				if !called {
+					called, before = true, f.calls(t)
+				}
+			})
+
+			restored := slices.ContainsFunc(before, func(c string) bool { return strings.Contains(c, " --from ") })
+			booted := slices.ContainsFunc(before, func(c string) bool { return strings.HasPrefix(c, "machine start ") })
+			if !called || restored || booted != cold {
+				t.Errorf("smolvm calls before the build = %q; want none for a restore, and a start for a cold boot", before)
+			}
+		})
+	}
+}
+
 func TestPlatformDoesNotStartColdAfterAnInterruptedRestore(t *testing.T) {
 	f := fakeSmolvm(t, vm(""))
 	fakeHost(t, f)

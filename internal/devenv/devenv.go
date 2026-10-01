@@ -214,15 +214,14 @@ func (e *Environment) forget() error {
 }
 
 // bringUp brings up the platform while it builds the first-party images, then installs them.
-// The build waits for the VM to start, because both use every CPU, and smolvm gives a VM only 30 s to answer.
 func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error {
-	started := make(chan struct{})
+	canBuild := make(chan struct{})
 	var a artifacts
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.platform(gctx, leftover, sync.OnceFunc(func() { close(started) })) })
+	g.Go(func() error { return e.platform(gctx, leftover, sync.OnceFunc(func() { close(canBuild) })) })
 	g.Go(func() error {
 		select {
-		case <-started:
+		case <-canBuild:
 		case <-gctx.Done():
 			return gctx.Err()
 		}

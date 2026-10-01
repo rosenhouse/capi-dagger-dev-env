@@ -27,12 +27,14 @@ const apiAttempt = 30 * time.Second
 // platform brings up everything in the VM that holds no first-party code: dockerd, the environment's registry,
 // the management cluster with kapp-controller, CAPI and CAPD, and the workload cluster. It restores them
 // from this host's platform checkpoint if there is one, and else, or if the restore fails, brings them up cold.
-// It calls started once the VM runs.
-func (e *Environment) platform(ctx context.Context, leftover smolvm.State, started func()) error {
+// It calls canBuild once the build may use every CPU: at once for a restore, which mostly waits on the disk,
+// or once a cold VM has booted.
+func (e *Environment) platform(ctx context.Context, leftover smolvm.State, canBuild func()) error {
 	checkpoint, err := e.platformCheckpoint()
 	if err == nil {
 		e.progress("platform: restoring " + checkpoint)
-		err = e.warmPlatform(ctx, leftover, checkpoint, started)
+		canBuild()
+		err = e.warmPlatform(ctx, leftover, checkpoint)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -49,7 +51,7 @@ func (e *Environment) platform(ctx context.Context, leftover smolvm.State, start
 		}
 	}
 	e.progress(fmt.Sprintf("platform: cold start, because %v", err))
-	return e.coldPlatform(ctx, leftover, started)
+	return e.coldPlatform(ctx, leftover, canBuild)
 }
 
 var errColdAsked = errors.New("--cold asked for one")
@@ -67,7 +69,7 @@ func (e *Environment) platformCheckpoint() (string, error) {
 }
 
 // warmPlatform restores the VM from a platform checkpoint, on fresh host ports, and waits for the platform's gates.
-func (e *Environment) warmPlatform(ctx context.Context, leftover smolvm.State, checkpoint string, started func()) error {
+func (e *Environment) warmPlatform(ctx context.Context, leftover smolvm.State, checkpoint string) error {
 	if leftover != "" {
 		if err := e.vm.Delete(ctx); err != nil {
 			return err
@@ -79,7 +81,6 @@ func (e *Environment) warmPlatform(ctx context.Context, leftover smolvm.State, c
 	if err := e.stage("start VM", func() error { return e.startRestored(ctx, checkpoint) }); err != nil {
 		return err
 	}
-	started()
 	if err := e.stage("kubeconfigs", func() error { return e.writeKubeconfigs(ctx) }); err != nil {
 		return err
 	}
@@ -127,7 +128,7 @@ func (e *Environment) onFreePorts(ctx context.Context, start func(state.Ports) e
 }
 
 // coldPlatform brings up the platform in a new VM, after it fills the download cache.
-func (e *Environment) coldPlatform(ctx context.Context, leftover smolvm.State, started func()) error {
+func (e *Environment) coldPlatform(ctx context.Context, leftover smolvm.State, booted func()) error {
 	downloads, err := downloads()
 	if err != nil {
 		return err
@@ -135,7 +136,7 @@ func (e *Environment) coldPlatform(ctx context.Context, leftover smolvm.State, s
 	if err := e.boot(ctx, leftover, downloads); err != nil {
 		return err
 	}
-	started()
+	booted()
 	if err := e.stage("guest tools", func() error {
 		if err := e.vm.Copy(ctx, e.cache(), downloads); err != nil {
 			return err
