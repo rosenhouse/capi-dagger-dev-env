@@ -32,13 +32,15 @@ import (
 )
 
 var (
-	amd64 = v1.Platform{OS: "linux", Architecture: "amd64"}
-	arm64 = v1.Platform{OS: "linux", Architecture: "arm64"}
+	amd64         = v1.Platform{OS: "linux", Architecture: "amd64"}
+	arm64         = v1.Platform{OS: "linux", Architecture: "arm64"}
+	epoch         = time.Unix(0, 0).UTC()
+	devenvHistory = v1.History{CreatedBy: "devenv", Created: v1.Time{Time: epoch}}
 )
 
 func TestBasePullsThePlatformsImageOnceAndCachesIt(t *testing.T) {
 	srv, ref, want := multiPlatformBase(t)
-	cache := t.TempDir()
+	cache := filepath.Join(t.TempDir(), "absent")
 
 	gotARM := base(t, ref, arm64, cache)
 	gotAMD := base(t, ref, amd64, cache)
@@ -78,6 +80,9 @@ func TestBaseSharesTheCacheBetweenConcurrentCalls(t *testing.T) {
 
 	if err := errors.Join(errs...); err != nil {
 		t.Error(err)
+	}
+	if entries, err := os.ReadDir(cache); err != nil || len(entries) != 1 {
+		t.Errorf("cache holds %v, %v; want one entry", entries, err)
 	}
 }
 
@@ -149,6 +154,9 @@ func TestImageAddsTheBinaryAsEntrypoint(t *testing.T) {
 	if !slices.Equal(cfg.Config.Entrypoint, []string{"/hello"}) || cfg.Config.Cmd != nil || cfg.Config.User != "65532" {
 		t.Errorf("entrypoint %q, cmd %q, user %q; want [/hello], none, the base's 65532", cfg.Config.Entrypoint, cfg.Config.Cmd, cfg.Config.User)
 	}
+	if h := cfg.History[len(cfg.History)-1]; h != devenvHistory {
+		t.Errorf("last history %+v, want %+v", h, devenvHistory)
+	}
 	layers, err := got.Layers()
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +227,9 @@ func TestBundleIsAnImgpkgBundle(t *testing.T) {
 	if label := cfg.Config.Labels["dev.carvel.imgpkg.bundle"]; label != "true" {
 		t.Errorf("bundle label %q", label)
 	}
+	if !cfg.Created.Equal(epoch) || !slices.Equal(cfg.History, []v1.History{devenvHistory}) {
+		t.Errorf("created %v, history %+v; want the epoch and %+v", cfg.Created, cfg.History, devenvHistory)
+	}
 	layers, err := got.Layers()
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +281,8 @@ func TestPushTagsLatestAndReturnsTheDigest(t *testing.T) {
 	}
 }
 
-func TestPushUsesPlainHTTPForAnyHost(t *testing.T) {
+// The other tests push over plain HTTP to 127.0.0.1.
+func TestPushRefusesPlainHTTPToOtherHosts(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.2:0")
 	if err != nil {
 		t.Skipf("needs 127.0.0.2: %v", err)
@@ -282,8 +294,8 @@ func TestPushUsesPlainHTTPForAnyHost(t *testing.T) {
 	t.Cleanup(srv.Close)
 	img := baseImage(t, types.OCIManifestSchema1, types.OCIConfigJSON, types.OCILayer)
 
-	if _, err := oci.Push(context.Background(), img, l.Addr().String()+"/hello"); err != nil {
-		t.Error(err)
+	if _, err := oci.Push(context.Background(), img, l.Addr().String()+"/hello"); err == nil {
+		t.Error("no error")
 	}
 }
 
@@ -421,7 +433,7 @@ func tarFiles(t *testing.T, l v1.Layer) map[string]tarFile {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !h.ModTime.Equal(time.Unix(0, 0)) {
+		if !h.ModTime.Equal(epoch) {
 			t.Errorf("%s has time %v, want the epoch", h.Name, h.ModTime)
 		}
 		b, err := io.ReadAll(tr)

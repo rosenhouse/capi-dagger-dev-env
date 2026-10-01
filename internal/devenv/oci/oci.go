@@ -106,7 +106,7 @@ func Image(base v1.Image, command string, binary []byte) (v1.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	img, err := mutate.AppendLayers(base, l)
+	img, err := mutate.Append(base, addendum(l))
 	if err != nil {
 		return nil, err
 	}
@@ -129,16 +129,20 @@ func Bundle(config map[string][]byte, imagesLock []byte) (v1.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	img, err := mutate.AppendLayers(empty.Image, l)
+	img, err := mutate.Append(empty.Image, addendum(l))
 	if err != nil {
+		return nil, err
+	}
+	if img, err = mutate.CreatedAt(img, v1.Time{Time: epoch}); err != nil {
 		return nil, err
 	}
 	return mutate.Config(img, v1.Config{Labels: map[string]string{"dev.carvel.imgpkg.bundle": "true"}})
 }
 
-// Push writes img to repo, tagged latest unless repo names a tag, over plain HTTP. It returns img's digest.
+// Push writes img to repo, tagged latest unless repo names a tag, and returns img's digest.
+// Like go-containerregistry, it allows plain HTTP only to localhost, 127.0.0.1 and private networks.
 func Push(ctx context.Context, img v1.Image, repo string) (v1.Hash, error) {
-	tag, err := name.NewTag(repo, name.Insecure)
+	tag, err := name.NewTag(repo)
 	if err != nil {
 		return v1.Hash{}, err
 	}
@@ -146,6 +150,12 @@ func Push(ctx context.Context, img v1.Image, repo string) (v1.Hash, error) {
 		return v1.Hash{}, err
 	}
 	return img.Digest()
+}
+
+var epoch = time.Unix(0, 0)
+
+func addendum(l v1.Layer) mutate.Addendum {
+	return mutate.Addendum{Layer: l, History: v1.History{CreatedBy: "devenv", Created: v1.Time{Time: epoch}}}
 }
 
 type file struct {
@@ -160,7 +170,7 @@ func layer(files []file, mediaType types.MediaType) (v1.Layer, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, f := range files {
-		h := &tar.Header{Typeflag: tar.TypeReg, Name: f.path, Mode: f.mode, Size: int64(len(f.content)), ModTime: time.Unix(0, 0)}
+		h := &tar.Header{Typeflag: tar.TypeReg, Name: f.path, Mode: f.mode, Size: int64(len(f.content)), ModTime: epoch}
 		if err := tw.WriteHeader(h); err != nil {
 			return nil, err
 		}

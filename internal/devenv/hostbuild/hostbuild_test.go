@@ -1,15 +1,16 @@
 package hostbuild_test
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"debug/buildinfo"
 	"debug/elf"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -150,36 +151,66 @@ func TestVersionSeparatesFiles(t *testing.T) {
 	}
 }
 
-func TestBuildCompilesEachCommandForLinux(t *testing.T) {
-	t.Setenv("GOOS", "windows")
-	t.Setenv("CGO_ENABLED", "1")
-	for arch, machine := range map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64} {
-		t.Run(arch, func(t *testing.T) {
+func TestBuildCompilesEachCommandForLinuxIgnoringTheHostsSettings(t *testing.T) {
+	for key, value := range map[string]string{"GOOS": "windows", "CGO_ENABLED": "1", "GOFLAGS": "-tags=hostonly",
+		"GOEXPERIMENT": "fieldtrack", "GOAMD64": "v3", "GOARM64": "v9.0"} {
+		t.Setenv(key, value)
+	}
+	for _, c := range []struct {
+		arch, level, levelDefault string
+		machine                   elf.Machine
+	}{{"amd64", "GOAMD64", "v1", elf.EM_X86_64}, {"arm64", "GOARM64", "v8.0", elf.EM_AARCH64}} {
+		t.Run(c.arch, func(t *testing.T) {
 			root, out := module(t), t.TempDir()
 			gitInit(t, root)
 
-			if _, err := hostbuild.Build(context.Background(), root, arch, "v1.2.3", out); err != nil {
+			if _, err := hostbuild.Build(context.Background(), root, c.arch, "v1.2.3", out); err != nil {
 				t.Fatal(err)
 			}
 
 			for _, name := range hostbuild.Commands {
 				path := filepath.Join(out, name)
-				if got := elfMachine(t, path); got != machine {
-					t.Errorf("%s is for %v, want %v", name, got, machine)
+				if got := elfMachine(t, path); got != c.machine {
+					t.Errorf("%s is for %v, want %v", name, got, c.machine)
 				}
-				want := map[string]string{"GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": "0", "-trimpath": "true"}
-				if got := settings(t, path); !mapContains(got, want) || hasVCS(got) {
-					t.Errorf("%s build settings %v, want %v and no vcs", name, got, want)
+				want := map[string]string{"GOOS": "linux", "GOARCH": c.arch, "CGO_ENABLED": "0", "-trimpath": "true", c.level: c.levelDefault}
+				got := settings(t, path)
+				_, tags := got["-tags"]
+				_, experiment := got["GOEXPERIMENT"]
+				if !mapContains(got, want) || hasVCS(got) || tags || experiment {
+					t.Errorf("%s build settings %v, want %v and no vcs, tags or experiment", name, got, want)
 				}
 			}
 		})
 	}
 }
 
-func TestBuildStampsTheVersion(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("runs linux binaries")
+func TestBuildTakesRelativePathsFromTheWorkingDirectory(t *testing.T) {
+	root := module(t)
+	wd := filepath.Dir(root)
+	t.Chdir(wd)
+
+	if _, err := hostbuild.Build(context.Background(), filepath.Base(root), runtime.GOARCH, "v1", "out"); err != nil {
+		t.Fatal(err)
 	}
+
+	if _, err := os.Stat(filepath.Join(wd, "out", "hello")); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestBuildWorksThroughASymlink(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(module(t), link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := hostbuild.Build(context.Background(), link, runtime.GOARCH, "v1", t.TempDir()); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestBuildStampsTheVersion(t *testing.T) {
 	for _, stamp := range []string{"v1.2.3", ""} {
 		t.Run(stamp, func(t *testing.T) {
 			root, out := module(t), t.TempDir()
@@ -193,9 +224,9 @@ func TestBuildStampsTheVersion(t *testing.T) {
 			if snap.Version != version(t, root) {
 				t.Errorf("snapshot version %s, want %s", snap.Version, version(t, root))
 			}
-			got, err := exec.Command(filepath.Join(out, "hello")).CombinedOutput()
-			if err != nil || string(got) != want+"\n" {
-				t.Errorf("hello printed %q, %v; want %q", got, err, want)
+			// -trimpath keeps -ldflags out of the build settings.
+			if b, err := os.ReadFile(filepath.Join(out, "hello")); err != nil || !bytes.Contains(b, []byte(want)) {
+				t.Errorf("hello does not hold %q: %v", want, err)
 			}
 		})
 	}
@@ -211,9 +242,11 @@ func TestBuildIgnoresWorkspaces(t *testing.T) {
 	}
 }
 
-func TestBuildSnapshotsConfigWithTheSource(t *testing.T) {
+func TestBuildSnapshotsEachPackagesConfigWithTheSource(t *testing.T) {
 	root := module(t)
 	write(t, root, "config/hello/sub/b.yaml", "b: 1\n")
+	write(t, root, "config/other/c.yaml", "c: 1\n")
+	write(t, root, "config/notes.md", "in no package\n")
 	editDuringBuild(t, filepath.Join(root, "config/hello/a.yaml"))
 
 	snap, err := hostbuild.Build(context.Background(), root, runtime.GOARCH, "v1", t.TempDir())
@@ -221,13 +254,65 @@ func TestBuildSnapshotsConfigWithTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := map[string]string{"hello/a.yaml": "a: 1\n", "hello/sub/b.yaml": "b: 1\n"}
-	got := map[string]string{}
-	for path, content := range snap.Config {
-		got[path] = string(content)
+	want := map[string]map[string]string{
+		"hello": {"a.yaml": "a: 1\n", "sub/b.yaml": "b: 1\n"},
+		"other": {"c.yaml": "c: 1\n"},
 	}
-	if !maps.Equal(got, want) {
+	got := map[string]map[string]string{}
+	for pkg, files := range snap.Config {
+		got[pkg] = map[string]string{}
+		for path, content := range files {
+			got[pkg][path] = string(content)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Config = %v, want %v", got, want)
+	}
+}
+
+func TestBuildAcceptsImportsFromTheVersionedSourceAndTheModuleCache(t *testing.T) {
+	root := module(t)
+	write(t, root, "go.mod", "module example\n\ngo 1.21\n\nrequire github.com/google/go-cmp v0.7.0\n")
+	write(t, root, "go.sum", goCmpSum)
+	write(t, root, "internal/greet/greet.go", "package greet\n\nconst Hi = \"hi\"\n")
+	write(t, root, "cmd/hello/main.go", importing("example/internal/greet", "github.com/google/go-cmp/cmp"))
+
+	if _, err := hostbuild.Build(context.Background(), root, runtime.GOARCH, "v1", t.TempDir()); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestBuildRejectsImportsThatVersionLeavesOut(t *testing.T) {
+	for _, c := range []struct {
+		files             map[string]string
+		importPath, inDir string
+	}{
+		{map[string]string{"pkg/greet/greet.go": "package greet\n"}, "example/pkg/greet", "pkg/greet"},
+		{map[string]string{"internal/devenv/greet/greet.go": "package greet\n"}, "example/internal/devenv/greet", "internal/devenv/greet"},
+		{map[string]string{
+			"go.mod":                            "module example\n\ngo 1.21\n\nrequire example.com/greet v1.0.0\n",
+			"vendor/modules.txt":                "# example.com/greet v1.0.0\n## explicit\nexample.com/greet\n",
+			"vendor/example.com/greet/greet.go": "package greet\n",
+		}, "example.com/greet", "vendor/example.com/greet"},
+		{map[string]string{
+			"go.mod":                  "module example\n\ngo 1.21\n\nrequire example.com/greet v1.0.0\n\nreplace example.com/greet => ../replacement\n",
+			"../replacement/go.mod":   "module example.com/greet\n",
+			"../replacement/greet.go": "package greet\n",
+		}, "example.com/greet", "replacement"},
+	} {
+		t.Run(c.inDir, func(t *testing.T) {
+			root := module(t)
+			for path, content := range c.files {
+				write(t, root, path, content)
+			}
+			write(t, root, "cmd/hello/main.go", importing(c.importPath))
+
+			_, err := hostbuild.Build(context.Background(), root, runtime.GOARCH, "v1", t.TempDir())
+
+			if err == nil || !strings.Contains(err.Error(), c.inDir) {
+				t.Errorf("err = %v, want one naming %s", err, c.inDir)
+			}
+		})
 	}
 }
 
@@ -263,6 +348,22 @@ func module(t *testing.T) string {
 	}
 	write(t, root, "config/hello/a.yaml", "a: 1\n")
 	return root
+}
+
+// goCmpSum is go.sum for github.com/google/go-cmp v0.7.0.
+const goCmpSum = `github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+`
+
+// importing is a main package that imports each of importPaths for its side effects and prints version.
+func importing(importPaths ...string) string {
+	var b strings.Builder
+	b.WriteString("package main\n\n")
+	for _, p := range importPaths {
+		fmt.Fprintf(&b, "import _ %q\n", p)
+	}
+	b.WriteString("\nvar version string\n\nfunc main() { println(version) }\n")
+	return b.String()
 }
 
 // editDuringBuild puts a go command on PATH that writes to path before running the real go.
