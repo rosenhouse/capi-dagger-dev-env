@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,8 +23,10 @@ func TestMachineLifecycle(t *testing.T) {
 	c := requireSmolvm(t)
 	ctx := t.Context()
 	source, restored, branch := machineName(), machineName(), machineName()
-	ports := []int{freePort(t), freePort(t), freePort(t)}
+	ports := freePorts(t, 3)
 	const served = "served from RAM\n"
+	// Start ignores a host proxy that the guest cannot reach.
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
 
 	deleteLater(t, c, source)
 	must(t, c.Create(ctx, source, smolvm.MachineConfig{CPUs: 1, MemoryMiB: 512, StorageGiB: 2, OverlayGiB: 1,
@@ -52,13 +53,12 @@ func TestMachineLifecycle(t *testing.T) {
 	if _, err := c.Run(ctx, source, "echo 'served from RAM' >/dev/shm/msg"); err != nil {
 		t.Fatal(err)
 	}
-	var pid strings.Builder
-	must(t, c.Exec(ctx, source, []string{"nc", "-lk", "-p", "8080", "-e", "cat", "/dev/shm/msg"},
-		smolvm.ExecOptions{Detach: true, Stdout: &pid}))
-	if _, err := strconv.Atoi(strings.TrimSpace(pid.String())); err != nil {
-		t.Errorf("detached Exec() printed %q; want a PID", pid.String())
-	}
+	pid, err := c.Spawn(ctx, source, []string{"nc", "-lk", "-p", "8080", "-e", "cat", "/dev/shm/msg"}, nil)
+	must(t, err)
 	wantServed(t, ports[0], served)
+	if comm, err := c.Run(ctx, source, fmt.Sprintf("cat /proc/%d/comm", pid)); err != nil || comm != "nc\n" {
+		t.Errorf("Spawn() returned PID %d, whose command is %q, %v; want nc", pid, comm, err)
+	}
 
 	file := filepath.Join(t.TempDir(), "source.checkpoint")
 	must(t, c.Checkpoint(ctx, source, file))
@@ -172,12 +172,16 @@ func keepConsoleLog(t *testing.T, c smolvm.CLI, name string) {
 	}
 }
 
-func freePort(t *testing.T) int {
+func freePorts(t *testing.T, n int) []int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	must(t, err)
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	var ports []int
+	for range n {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		must(t, err)
+		defer l.Close()
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
+	}
+	return ports
 }
 
 // wantServed waits for the guest server behind a published port. smolvm accepts a connection

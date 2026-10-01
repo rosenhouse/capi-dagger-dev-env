@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -54,7 +53,7 @@ func linuxAMD64Contract(cpuinfo string) string {
 func CheckpointContract(file string) (string, error) {
 	manifest, err := readManifest(file)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", file, err)
+		return "", err
 	}
 	var m struct {
 		Checkpoint struct {
@@ -90,17 +89,17 @@ func readManifest(file string) ([]byte, error) {
 	footer := make([]byte, 64)
 	end := info.Size() - int64(len(footer))
 	if end < 0 {
-		return nil, errors.New("too short for a checkpoint")
+		return nil, fmt.Errorf("%s: too short for a checkpoint", file)
 	}
 	if _, err := f.ReadAt(footer, end); err != nil {
 		return nil, err
 	}
 	if string(footer[:8]) != "SMOLPACK" {
-		return nil, errors.New("not a checkpoint")
+		return nil, fmt.Errorf("%s: not a checkpoint", file)
 	}
 	size := binary.LittleEndian.Uint64(footer[44:])
 	if size > min(16<<20, uint64(end)) {
-		return nil, fmt.Errorf("manifest size %d exceeds 16 MiB or the file", size)
+		return nil, fmt.Errorf("%s: manifest size %d exceeds 16 MiB or the file", file, size)
 	}
 	manifest := make([]byte, size)
 	_, err = f.ReadAt(manifest, end-int64(size))

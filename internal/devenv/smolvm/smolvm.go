@@ -28,7 +28,7 @@ type CLI struct {
 
 // ExitError reports a smolvm command that exited nonzero.
 type ExitError struct {
-	// Command holds smolvm's arguments up to any "--", without environment values.
+	// Command holds smolvm's arguments without environment values. For exec, it ends with the guest command's name.
 	Command string
 	// Code is smolvm's exit code. Exec passes on the guest command's code, but smolvm's own failures exit 1 too.
 	Code int
@@ -46,12 +46,8 @@ func (c CLI) CheckVersion(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w\n%s", err, installHint)
 	}
-	fields := strings.Fields(out)
-	if len(fields) != 2 || fields[0] != "smolvm" {
-		return fmt.Errorf("smolvm --version printed %q\n%s", out, installHint)
-	}
-	if fields[1] != Version {
-		return fmt.Errorf("smolvm is %s; want %s\n%s", fields[1], Version, installHint)
+	if strings.TrimSpace(out) != "smolvm "+Version {
+		return fmt.Errorf("smolvm --version printed %q; want smolvm %s\n%s", out, Version, installHint)
 	}
 	return nil
 }
@@ -64,7 +60,7 @@ func (c CLI) output(ctx context.Context, args ...string) (string, error) {
 
 func (c CLI) run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, cmp.Or(c.Path, "smolvm"), args...)
-	// On SIGINT, smolvm kills a VM it is starting. SIGKILL would orphan the VM.
+	// SIGINT lets smolvm kill the VM once its agent is up. Before that, either signal leaves the VM running.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = waitDelay
 	var tail tail
@@ -96,10 +92,10 @@ func onNewLine(s string) string {
 // waitDelay bounds how long smolvm may ignore SIGINT.
 var waitDelay = 5 * time.Second
 
-// commandLine returns args up to any "--", without environment values.
+// commandLine returns args up to the one after any "--", without environment values.
 func commandLine(args []string) string {
 	if i := slices.Index(args, "--"); i >= 0 {
-		args = args[:i]
+		args = args[:min(i+2, len(args))]
 	}
 	args = slices.Clone(args)
 	for i := 1; i < len(args); i++ {
