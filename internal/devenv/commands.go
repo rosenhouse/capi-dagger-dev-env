@@ -140,7 +140,7 @@ func Status(ctx context.Context, o Options, out io.Writer) error {
 	if len(others) == 0 {
 		return nil
 	}
-	fmt.Fprintln(out, "\nOther devenv VMs, from other state dirs or deleted ones. Delete one with: smolvm machine delete -f --name <VM>")
+	fmt.Fprintln(out, "\nThese devenv VMs belong to other state dirs, or to deleted ones. Delete one with: smolvm machine delete -f --name <VM>")
 	w = tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	for _, m := range others {
 		fmt.Fprintf(w, "%s\t%s\n", m.Name, m.State)
