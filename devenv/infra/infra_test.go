@@ -42,26 +42,21 @@ func TestRequireInotifyLimits(t *testing.T) {
 	}
 }
 
-// runClusterScript runs managementClusterScript with fake kind and docker commands.
-// kind create fails the first `failures` times. docker prints journal, as journalctl would.
-func runClusterScript(t *testing.T, failures int, journal string) (calls string, err error) {
+// runClusterScript runs managementClusterScript with a fake kind command, whose create fails the first `failures` times.
+func runClusterScript(t *testing.T, failures int) (calls string, err error) {
 	t.Helper()
 	bin := t.TempDir()
 	log := filepath.Join(bin, "calls")
-	fakes := map[string]string{
-		"kind": `cat >/dev/null
+	kind := `#!/bin/sh
+cat >/dev/null
 echo "kind $*" >>` + log + `
 if [ "$1" = create ]; then
 	n=$(grep -c "kind create" ` + log + `)
 	[ "$n" -gt ` + strconv.Itoa(failures) + ` ]
-fi`,
-		"docker": `echo "docker $*" >>` + log + `
-printf '%s\n' '` + journal + `'`,
-	}
-	for name, body := range fakes {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "kind"), []byte(kind), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	cmd := exec.Command("sh", "-c", managementClusterScript())
 	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
@@ -76,7 +71,7 @@ var (
 )
 
 func TestManagementClusterScriptCreatesTheCluster(t *testing.T) {
-	calls, err := runClusterScript(t, 0, "")
+	calls, err := runClusterScript(t, 0)
 
 	if err != nil || calls != createCall+getCall {
 		t.Errorf("err = %v, calls:\n%s", err, calls)
@@ -84,34 +79,53 @@ func TestManagementClusterScriptCreatesTheCluster(t *testing.T) {
 }
 
 func TestManagementClusterScriptFailsWhenCreateFails(t *testing.T) {
-	calls, err := runClusterScript(t, 1, "Failed to write cgroup.subtree_control: device or resource busy")
+	calls, err := runClusterScript(t, 1)
 
 	if err == nil || strings.Count(calls, "kind create") != 1 {
 		t.Errorf("err = %v, calls:\n%s", err, calls)
 	}
 }
 
-func TestKubeletDropInEmptiesTheRootCgroup(t *testing.T) {
+// runKubeletDropIn runs kubeletDropIn's ExecStartPre against a fake cgroup tree with procs in its root.
+func runKubeletDropIn(t *testing.T, procs string, moveFails bool) (moved string, err error) {
+	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "init.scope"), 0o755); err != nil {
+	scope := filepath.Join(root, "init.scope")
+	if err := os.MkdirAll(scope, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), []byte("0\n123\n456\n"), 0o644); err != nil {
+	if moveFails {
+		scope = filepath.Join(scope, "cgroup.procs")
+		if err := os.Mkdir(scope, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), []byte(procs), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, command, ok := strings.Cut(kubeletDropIn, "ExecStartPre=")
+	_, command, ok := strings.Cut(kubeletDropIn, "ExecStartPre=/bin/sh -c ")
 	if !ok {
 		t.Fatal("no ExecStartPre")
 	}
-	// systemd unescapes $$; the test points the command at a fake cgroup tree.
-	command = strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(command), "$$", "$"), "/sys/fs/cgroup", root)
-	if out, err := exec.Command("sh", "-c", strings.Trim(strings.TrimPrefix(command, "/bin/sh -c "), "'")).CombinedOutput(); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
+	// systemd unescapes $$ and strips the quotes; the test points the command at the fake tree.
+	command = strings.Trim(strings.TrimSpace(command), "'")
+	command = strings.ReplaceAll(strings.ReplaceAll(command, "$$", "$"), "/sys/fs/cgroup", root)
+	err = exec.Command("sh", "-c", command).Run()
+	out, _ := os.ReadFile(filepath.Join(root, "init.scope", "cgroup.procs"))
+	return string(out), err
+}
 
-	moved, _ := os.ReadFile(filepath.Join(root, "init.scope", "cgroup.procs"))
-	if string(moved) != "123\n456\n" {
-		t.Errorf("moved %q", moved)
+func TestKubeletDropInEmptiesTheRootCgroup(t *testing.T) {
+	moved, err := runKubeletDropIn(t, "0\n123\n456\n", false)
+
+	if err != nil || moved != "123\n456\n" {
+		t.Errorf("moved %q, err %v", moved, err)
+	}
+}
+
+func TestKubeletDropInToleratesAProcessThatCannotMove(t *testing.T) {
+	if _, err := runKubeletDropIn(t, "123\n", true); err != nil {
+		t.Errorf("a failed move failed the kubelet's start: %v", err)
 	}
 }
 
