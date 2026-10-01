@@ -217,6 +217,19 @@ func TestRunningMeansTheVMIsRunning(t *testing.T) {
 	}
 }
 
+func TestUnclaimedFindsDevenvVMsOfNoEnvironment(t *testing.T) {
+	root := t.TempDir()
+	alpha := newEnv(t, root, "alpha")
+	other := newEnv(t, t.TempDir(), "alpha")
+	machines := []smolvm.Machine{{Name: alpha.VM()}, {Name: other.VM()}, {Name: "unrelated"}}
+
+	got := state.Unclaimed([]state.Env{alpha}, machines)
+
+	if len(got) != 1 || got[0].Name != other.VM() {
+		t.Errorf("Unclaimed() = %+v", got)
+	}
+}
+
 func TestPortsAreRecordedInTheEnvDir(t *testing.T) {
 	env := newEnv(t, t.TempDir(), "alpha")
 	if _, err := env.ReadPorts(); err == nil || !strings.Contains(err.Error(), "no ports") {

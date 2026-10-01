@@ -26,7 +26,7 @@ const apiAttempt = 30 * time.Second
 
 // boot creates the VM while it fills the download cache.
 func (e *Environment) boot(ctx context.Context, leftover smolvm.State) error {
-	downloads, err := e.downloads()
+	downloads, err := downloads()
 	if err != nil {
 		return err
 	}
@@ -44,21 +44,22 @@ func (e *Environment) boot(ctx context.Context, leftover smolvm.State) error {
 	return g.Wait()
 }
 
-func (e *Environment) downloads() ([]infra.Download, error) {
+// downloads are the files that the guest needs, for a guest of the host's architecture.
+func downloads() ([]infra.Download, error) {
 	downloads, err := infra.Downloads(runtime.GOARCH)
 	return append(downloads, platform.Downloads()...), err
 }
 
-func (e *Environment) startLock() string { return filepath.Join(e.cacheDir, "start.lock") }
+func (e *Environment) startLock() string { return filepath.Join(e.opts.CacheDir, "start.lock") }
 
 func (e *Environment) cache() fetch.Cache {
-	return fetch.Cache{Dir: filepath.Join(e.cacheDir, "downloads")}
+	return fetch.Cache{Dir: filepath.Join(e.opts.CacheDir, "downloads")}
 }
 
-// platform brings up everything in the VM that holds no first-party code: dockerd, the session registry,
+// platform brings up everything in the VM that holds no first-party code: dockerd, the environment's registry,
 // the management cluster with kapp-controller, CAPI and CAPD, and the workload cluster.
 func (e *Environment) platform(ctx context.Context) error {
-	downloads, err := e.downloads()
+	downloads, err := downloads()
 	if err != nil {
 		return err
 	}
@@ -73,10 +74,10 @@ func (e *Environment) platform(ctx context.Context) error {
 	if err := e.stage("docker daemon", func() error { return e.vm.StartDocker(ctx) }); err != nil {
 		return err
 	}
-	if err := e.stage("registry", e.startRegistry(ctx)); err != nil {
+	if err := e.stage("registry", func() error { return e.startRegistry(ctx) }); err != nil {
 		return err
 	}
-	if err := e.stage("management cluster", e.managementCluster(ctx)); err != nil {
+	if err := e.stage("management cluster", func() error { return e.managementCluster(ctx) }); err != nil {
 		return err
 	}
 	g, gctx := errgroup.WithContext(ctx)
@@ -89,15 +90,15 @@ func (e *Environment) platform(ctx context.Context) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	if err := e.stage("workload cluster", e.workloadCluster(ctx)); err != nil {
+	if err := e.stage("workload cluster", func() error { return e.workloadCluster(ctx) }); err != nil {
 		return err
 	}
-	return e.stage("workload API", e.workloadAPI(ctx))
+	return e.stage("workload API", func() error { return e.workloadAPI(ctx) })
 }
 
 // createVM deletes a VM that an earlier run left, then creates and starts the environment's VM on free host ports.
-// A host-wide lock keeps other environments from taking the same ports meanwhile. It also serializes first starts:
-// smolvm 1.22.0 then expands its disk templates through one fixed scratch file, so a VM could boot from a half-written disk.
+// A host-wide lock keeps other environments from taking the same ports meanwhile. It also serializes the first start
+// after installing smolvm 1.22.0, which expands its disk templates through one fixed scratch file.
 func (e *Environment) createVM(ctx context.Context, leftover smolvm.State) error {
 	unlock, err := state.WaitLock(ctx, e.startLock())
 	if err != nil {
@@ -120,17 +121,15 @@ func (e *Environment) createVM(ctx context.Context, leftover smolvm.State) error
 	return e.vm.Create(ctx, ports)
 }
 
-func (e *Environment) startRegistry(ctx context.Context) func() error {
-	return func() error {
-		if err := e.vm.StartRegistry(ctx); err != nil {
-			return err
-		}
-		url := fmt.Sprintf("http://localhost:%d/v2/", e.Ports.Registry)
-		return ready.Wait(ctx, ready.Gate{
-			Name: "registry answers from host", Timeout: time.Minute, Interval: time.Second, Attempt: 5 * time.Second,
-			Check: func(ctx context.Context) error { return get(ctx, url) },
-		})
+func (e *Environment) startRegistry(ctx context.Context) error {
+	if err := e.vm.StartRegistry(ctx); err != nil {
+		return err
 	}
+	url := fmt.Sprintf("http://localhost:%d/v2/", e.Ports.Registry)
+	return e.wait(ctx, ready.Gate{
+		Name: "registry answers from host", Timeout: time.Minute, Interval: time.Second, Attempt: 5 * time.Second,
+		Check: func(ctx context.Context) error { return get(ctx, url) },
+	})
 }
 
 func get(ctx context.Context, url string) error {
@@ -149,74 +148,68 @@ func get(ctx context.Context, url string) error {
 	return nil
 }
 
-func (e *Environment) managementCluster(ctx context.Context) func() error {
-	return func() error {
-		kubeconfig, err := e.vm.CreateManagementCluster(ctx)
-		if err != nil {
-			return err
-		}
-		if _, err := e.WriteKubeconfig("mgmt", kubeconfig, e.Ports.MgmtAPI); err != nil {
-			return err
-		}
-		cs, err := kube.Client(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
-		})
+func (e *Environment) managementCluster(ctx context.Context) error {
+	kubeconfig, err := e.vm.CreateManagementCluster(ctx)
+	if err != nil {
+		return err
 	}
+	if _, err := e.WriteKubeconfig("mgmt", kubeconfig, e.Ports.MgmtAPI); err != nil {
+		return err
+	}
+	cs, err := kube.Client(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	return e.wait(ctx, ready.Gate{
+		Name: "nodes Ready", Timeout: 3 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
+		Check: func(ctx context.Context) error { return kube.NodesReady(ctx, cs) },
+	})
 }
 
-func (e *Environment) workloadCluster(ctx context.Context) func() error {
-	return func() error {
-		if err := ready.Wait(ctx, ready.Gate{
-			// CAPI's and CAPD's webhooks can refuse connections for a while after clusterctl init returns.
-			Name: "workload cluster manifests applied", Timeout: 3 * time.Minute, Interval: 5 * time.Second,
-			Check: func(ctx context.Context) error {
-				return platform.CreateWorkloadCluster(ctx, e.vm, WorkloadCluster, WorkloadNamespace)
-			},
-		}); err != nil {
-			return err
-		}
-		dyn, err := kube.Dynamic(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error {
-				return kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster)
-			},
-		})
+func (e *Environment) workloadCluster(ctx context.Context) error {
+	if err := e.wait(ctx, ready.Gate{
+		// CAPI's and CAPD's webhooks can refuse connections for a while after clusterctl init returns.
+		Name: "workload cluster manifests applied", Timeout: 3 * time.Minute, Interval: 5 * time.Second, Attempt: time.Minute,
+		Check: func(ctx context.Context) error {
+			return platform.CreateWorkloadCluster(ctx, e.vm, WorkloadCluster, WorkloadNamespace)
+		},
+	}); err != nil {
+		return err
 	}
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	return e.wait(ctx, ready.Gate{
+		Name: "workload Cluster Available", Timeout: 10 * time.Minute, Interval: 5 * time.Second, Attempt: apiAttempt,
+		Check: func(ctx context.Context) error {
+			return kube.ClusterAvailable(ctx, dyn, WorkloadNamespace, WorkloadCluster)
+		},
+	})
 }
 
 // workloadAPI publishes the workload API server to the host and writes its kubeconfig.
-func (e *Environment) workloadAPI(ctx context.Context) func() error {
-	return func() error {
-		if err := e.vm.ForwardWorkloadAPI(ctx, WorkloadCluster); err != nil {
-			return err
-		}
-		mgmt, err := kube.Client(e.MgmtKubeconfig)
-		if err != nil {
-			return err
-		}
-		secret, err := mgmt.CoreV1().Secrets(WorkloadNamespace).Get(ctx, WorkloadCluster+"-kubeconfig", metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if _, err := e.WriteKubeconfig("workload", secret.Data["value"], e.Ports.WorkloadAPI); err != nil {
-			return err
-		}
-		workload, err := kube.Client(e.WorkloadKubeconfig)
-		if err != nil {
-			return err
-		}
-		return ready.Wait(ctx, ready.Gate{
-			Name: "workload nodes Ready from host", Timeout: 2 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
-			Check: func(ctx context.Context) error { return kube.NodesReady(ctx, workload) },
-		})
+func (e *Environment) workloadAPI(ctx context.Context) error {
+	if err := e.vm.ForwardWorkloadAPI(ctx, WorkloadCluster); err != nil {
+		return err
 	}
+	mgmt, err := kube.Client(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	secret, err := mgmt.CoreV1().Secrets(WorkloadNamespace).Get(ctx, WorkloadCluster+"-kubeconfig", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if _, err := e.WriteKubeconfig("workload", secret.Data["value"], e.Ports.WorkloadAPI); err != nil {
+		return err
+	}
+	workload, err := kube.Client(e.WorkloadKubeconfig)
+	if err != nil {
+		return err
+	}
+	return e.wait(ctx, ready.Gate{
+		Name: "workload nodes Ready from host", Timeout: 2 * time.Minute, Interval: 2 * time.Second, Attempt: apiAttempt,
+		Check: func(ctx context.Context) error { return kube.NodesReady(ctx, workload) },
+	})
 }

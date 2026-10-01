@@ -113,7 +113,24 @@ func WaitLock(ctx context.Context, path string) (unlock func(), err error) {
 }
 
 // VM names the environment's smolvm machine.
-func (e Env) VM() string { return "devenv-" + e.ID }
+func (e Env) VM() string { return vmPrefix + e.ID }
+
+const vmPrefix = "devenv-"
+
+// Unclaimed returns the devenv VMs among machines that belong to none of envs.
+func Unclaimed(envs []Env, machines []smolvm.Machine) []smolvm.Machine {
+	claimed := map[string]bool{}
+	for _, e := range envs {
+		claimed[e.VM()] = true
+	}
+	var unclaimed []smolvm.Machine
+	for _, m := range machines {
+		if strings.HasPrefix(m.Name, vmPrefix) && !claimed[m.Name] {
+			unclaimed = append(unclaimed, m)
+		}
+	}
+	return unclaimed
+}
 
 // VMState returns the state of the environment's VM among machines, or "" if there is none.
 func (e Env) VMState(machines []smolvm.Machine) smolvm.State {

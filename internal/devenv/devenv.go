@@ -2,6 +2,7 @@
 package devenv
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/smolvm"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
@@ -24,12 +27,23 @@ import (
 type Options struct {
 	Name     string
 	StateDir string
+	// Source is the root of devenv's own module, which it builds from.
+	Source string
+	// CacheDir holds downloads and base images for every environment.
+	CacheDir string
+	// Command is how the user runs devenv, for hints.
+	Command string
 	// Verbose streams guest command output to stderr as well as to the environment's guest.log.
 	Verbose bool
+	// Retain keeps the VM of a failed bring-up, for debugging.
+	Retain bool
 	// Progress receives one line as each stage starts, and one as it ends.
 	Progress io.Writer
 	SmolVM   smolvm.CLI
 }
+
+// hint returns a devenv command line as the user runs devenv.
+func (o Options) hint(args string) string { return cmp.Or(o.Command, "devenv") + " " + args }
 
 // Environment is an environment that this process holds until Close.
 type Environment struct {
@@ -37,16 +51,15 @@ type Environment struct {
 	Ports              state.Ports
 	MgmtKubeconfig     string
 	WorkloadKubeconfig string
-	// Packages are rendered Package resources for the first-party bundles in the session registry.
-	Packages [][]byte
+	// packageManifests are rendered Package resources for the first-party bundles in the environment's registry.
+	packageManifests [][]byte
 	// bundles maps each package name to its bundle's digest reference.
 	bundles map[string]string
 
-	opts     Options
-	start    time.Time
-	vm       *infra.VM
-	cacheDir string
-	closers  []func() error
+	opts    Options
+	start   time.Time
+	vm      *infra.VM
+	closers []func() error
 }
 
 // open holds env and opens its guest log.
@@ -64,10 +77,6 @@ func open(env state.Env, o Options) (*Environment, error) {
 	if o.Verbose {
 		log = io.MultiWriter(logFile, os.Stderr)
 	}
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = os.TempDir()
-	}
 	return &Environment{
 		Env:                env,
 		MgmtKubeconfig:     filepath.Join(env.Dir, "mgmt.kubeconfig"),
@@ -75,15 +84,17 @@ func open(env state.Env, o Options) (*Environment, error) {
 		opts:               o,
 		start:              time.Now(),
 		vm:                 &infra.VM{CLI: o.SmolVM, Name: env.VM(), Log: &syncWriter{w: log}},
-		cacheDir:           filepath.Join(cacheDir, "devenv"),
 		closers:            []func() error{logFile.Close, func() error { unlock(); return nil }},
 	}, nil
 }
 
-// Up creates the environment called o.Name, or a randomly named one, and waits for its readiness gates.
-// A failed bring-up exports logs and deletes the VM.
+// Up brings up the environment called o.Name, or else the only one, or else a new one with a random name,
+// and waits for its readiness gates. A failed bring-up exports logs and deletes the VM, unless o.Retain.
 func Up(ctx context.Context, o Options) (*Environment, error) {
-	env, err := state.New(o.StateDir, o.Name)
+	if err := checkHost(ctx, o); err != nil {
+		return nil, err
+	}
+	env, err := upTarget(o)
 	if err != nil {
 		return nil, err
 	}
@@ -98,33 +109,67 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	if err := e.forget(); err != nil {
 		return nil, errors.Join(err, e.Close())
 	}
-	if err := e.bringUp(ctx, leftover); err != nil {
-		e.ExportLogs(ctx)
-		_, deleteErr := e.Delete(ctx, false)
-		return nil, errors.Join(fmt.Errorf("%w\nlogs: %s", err, e.Dir), deleteErr, e.Close())
+	err = e.bringUp(ctx, leftover)
+	if err == nil {
+		err = e.MarkReady()
+	}
+	if err != nil {
+		return nil, errors.Join(e.fail(ctx, err), e.Close())
 	}
 	return e, nil
+}
+
+// checkHost fails unless devenv has its source, smolvm's pinned version and KVM.
+func checkHost(ctx context.Context, o Options) error {
+	if o.Source == "" {
+		return errNoSource
+	}
+	return errors.Join(o.SmolVM.CheckVersion(ctx), checkKVM(kvmDevice))
+}
+
+// upTarget returns the environment called o.Name, or else the only one, or else a new one with a random name.
+func upTarget(o Options) (state.Env, error) {
+	if o.Name == "" {
+		envs, err := state.List(o.StateDir)
+		if err != nil {
+			return state.Env{}, err
+		}
+		if len(envs) == 1 {
+			return envs[0], nil
+		}
+	}
+	return state.New(o.StateDir, o.Name)
 }
 
 // kvmDevice is a variable so that tests can stand in for KVM.
 var kvmDevice = "/dev/kvm"
 
-// preflight checks the host and returns the state of a VM left by an earlier run, which must not be running.
+// preflight returns the state of a VM that an earlier run left. A running VM must not have become ready.
 func (e *Environment) preflight(ctx context.Context) (smolvm.State, error) {
-	if err := errors.Join(e.opts.SmolVM.CheckVersion(ctx), checkKVM(kvmDevice)); err != nil {
-		return "", err
-	}
 	machines, err := e.opts.SmolVM.List(ctx)
 	if err != nil {
 		return "", err
 	}
-	if e.Running(machines) {
-		return "", fmt.Errorf("environment %s is already up; use it, or delete it with: devenv down --name %s", e.Name, e.Name)
+	if e.Running(machines) && e.Ready() {
+		return "", fmt.Errorf("environment %s is already up; use it, or delete it with: %s", e.Name, e.opts.hint("down --name "+e.Name))
+	}
+	envs, err := state.List(e.opts.StateDir)
+	if err != nil {
+		return "", err
+	}
+	var others []string
+	for _, env := range envs {
+		if env.Name != e.Name && env.Running(machines) {
+			others = append(others, env.Name)
+		}
+	}
+	if len(others) > 0 {
+		e.progress("also running here, each in its own VM: " + strings.Join(others, ", "))
 	}
 	return e.VMState(machines), nil
 }
 
-// checkKVM fails on Linux unless this user can open device, KVM's, to read and write.
+// checkKVM fails on Linux unless this user can open the KVM device to read and write.
 func checkKVM(device string) error {
 	if runtime.GOOS != "linux" {
 		return nil
@@ -141,9 +186,14 @@ func checkKVM(device string) error {
 	return f.Close()
 }
 
+// lastRun lists what a run leaves in the env dir, besides guest.log.
+func (e *Environment) lastRun() []string {
+	return []string{e.MgmtKubeconfig, e.WorkloadKubeconfig, filepath.Join(e.Dir, "ports.json"), filepath.Join(e.Dir, "ready")}
+}
+
 // forget deletes what an earlier run left in the env dir.
 func (e *Environment) forget() error {
-	for _, path := range []string{e.MgmtKubeconfig, e.WorkloadKubeconfig, filepath.Join(e.Dir, "ports.json"), filepath.Join(e.Dir, "logs")} {
+	for _, path := range append(e.lastRun(), filepath.Join(e.Dir, "logs")) {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
@@ -157,16 +207,37 @@ func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error 
 	if err := e.boot(ctx, leftover); err != nil {
 		return err
 	}
-	var b build
+	var a artifacts
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return e.platform(gctx) })
 	g.Go(func() error {
-		return e.stage("build images", func() (err error) { b, err = e.build(gctx, ""); return err })
+		return e.stage("build images", func() (err error) { a, err = e.build(gctx, ""); return err })
 	})
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return e.firstParty(ctx, b)
+	return e.firstParty(ctx, a)
+}
+
+// fail exports logs, unless ctx has ended, and deletes the VM, unless o.Retain.
+func (e *Environment) fail(ctx context.Context, err error) error {
+	interrupted := ctx.Err() != nil
+	if interrupted {
+		err = errors.New("interrupted")
+	} else {
+		e.exportLogs(ctx)
+		err = fmt.Errorf("%w\nlogs: %s", err, e.Dir)
+	}
+	if e.opts.Retain {
+		return fmt.Errorf("%w\nkept the VM; delete it with: %s", err, e.opts.hint("down --name "+e.Name))
+	}
+	if _, deleteErr := e.Delete(ctx, false); deleteErr != nil {
+		return errors.Join(err, deleteErr)
+	}
+	if interrupted {
+		return errors.New("interrupted; deleted the VM")
+	}
+	return err
 }
 
 // The workload Cluster's name and namespace in the management cluster.
@@ -185,8 +256,11 @@ func Machines(ctx context.Context, o Options) ([]smolvm.Machine, error) {
 	return o.SmolVM.List(ctx)
 }
 
-// Open holds the environment called o.Name, or the only one, or else the only running one. Its VM must be running.
+// Open holds the environment called o.Name, or the only one, or else the only running one. It must be up.
 func Open(ctx context.Context, o Options) (*Environment, error) {
+	if o.Source == "" {
+		return nil, errNoSource
+	}
 	machines, err := Machines(ctx, o)
 	if err != nil {
 		return nil, err
@@ -199,8 +273,13 @@ func Open(ctx context.Context, o Options) (*Environment, error) {
 	if err != nil {
 		return nil, err
 	}
-	if machines, err = o.SmolVM.List(ctx); err == nil && !env.Running(machines) {
-		err = fmt.Errorf("environment %s is not running", env.Name)
+	if machines, err = o.SmolVM.List(ctx); err == nil {
+		switch {
+		case !env.Running(machines):
+			err = fmt.Errorf("environment %s is not running", env.Name)
+		case !env.Ready():
+			err = fmt.Errorf("environment %s never became ready; bring it up again with: %s", env.Name, o.hint("up --name "+env.Name))
+		}
 	}
 	if err == nil {
 		e.Ports, err = env.ReadPorts()
@@ -234,8 +313,8 @@ func (e *Environment) Verify(ctx context.Context) error {
 	)
 }
 
-// Delete deletes the environment's VM, kubeconfigs and ports, and with purge its whole state dir.
-// It reports whether there was a VM.
+// Delete deletes the environment's VM and what its last run left, and with purge its whole state dir.
+// It finishes even if ctx ends. It reports whether there was a VM.
 func (e *Environment) Delete(ctx context.Context, purge bool) (bool, error) {
 	ctx = context.WithoutCancel(ctx)
 	machines, err := e.opts.SmolVM.List(ctx)
@@ -248,7 +327,7 @@ func (e *Environment) Delete(ctx context.Context, purge bool) (bool, error) {
 			return true, err
 		}
 	}
-	paths := []string{e.MgmtKubeconfig, e.WorkloadKubeconfig, filepath.Join(e.Dir, "ports.json")}
+	paths := e.lastRun()
 	if purge {
 		paths = []string{e.Dir}
 	}
@@ -280,13 +359,14 @@ func (e *Environment) stage(name string, run func() error) error {
 	return nil
 }
 
-// ExportLogs writes cluster logs and resources to the environment directory, as far as bring-up got.
-// After an interrupt, it does nothing, so that the VM's deletion follows at once.
-func (e *Environment) ExportLogs(ctx context.Context) {
-	if ctx.Err() != nil {
-		e.progress("interrupted, so not exporting logs")
-		return
-	}
+// wait waits for g, and logs its checks to guest.log.
+func (e *Environment) wait(ctx context.Context, g ready.Gate) error {
+	g.Log = e.vm.Log
+	return ready.Wait(ctx, g)
+}
+
+// exportLogs writes cluster logs and resources to the environment directory, as far as bring-up got.
+func (e *Environment) exportLogs(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	if machines, err := e.opts.SmolVM.List(ctx); err != nil || e.VMState(machines) == "" {
