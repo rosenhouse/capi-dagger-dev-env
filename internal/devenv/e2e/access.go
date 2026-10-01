@@ -11,7 +11,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -19,12 +18,13 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/transport/spdy"
+	"k8s.io/streaming/pkg/httpstream"
 	"k8s.io/utils/ptr"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 )
 
-// KubectlWorks waits until, as kubectl does them, logs and port-forward work against CoreDNS and exec against etcd.
+// KubectlWorks waits until logs and port-forward to CoreDNS, and exec in etcd, work the way kubectl does them.
 // Every cluster here runs both in kube-system.
 func KubectlWorks(ctx context.Context, kubeconfig string) error {
 	return ready.Wait(ctx, ready.Gate{
@@ -63,12 +63,12 @@ func kubectlWorks(ctx context.Context, kubeconfig string) error {
 }
 
 func firstPod(ctx context.Context, cs kubernetes.Interface, selector string) (string, error) {
-	pods, err := cs.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{LabelSelector: selector})
+	pods, err := cs.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{LabelSelector: selector, FieldSelector: "status.phase=Running"})
 	if err != nil {
 		return "", err
 	}
 	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no pod in kube-system matches %s", selector)
+		return "", fmt.Errorf("no running pod in kube-system matches %s", selector)
 	}
 	return pods.Items[0].Name, nil
 }
@@ -91,7 +91,10 @@ func execEtcdVersion(ctx context.Context, cfg *rest.Config, cs *kubernetes.Clien
 	}
 	var stdout, stderr bytes.Buffer
 	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr}); err != nil {
-		return fmt.Errorf("%w: %s", err, stderr.String())
+		if stderr.Len() > 0 {
+			err = fmt.Errorf("%w: %s", err, stderr.String())
+		}
+		return err
 	}
 	if !strings.Contains(stdout.String(), "etcd Version") {
 		return fmt.Errorf("etcd --version printed %q", stdout.String())
@@ -133,7 +136,7 @@ func portForwardHealth(ctx context.Context, cfg *rest.Config, cs *kubernetes.Cli
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: &http.Transport{DisableKeepAlives: true}}).Do(req)
 	if err != nil {
 		return err
 	}
