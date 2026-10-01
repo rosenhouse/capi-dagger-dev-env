@@ -1,0 +1,51 @@
+name: platform-cache
+description: >
+  Builds devenv to $RUNNER_TEMP/devenv, and restores this runner's platform checkpoint from the cache.
+  It writes the CPU, the checkpoint's key and how the restore went to $RUNNER_TEMP/platform.md.
+inputs:
+  save-on-miss:
+    description: On a miss, save a checkpoint in this job, without publishing it to the cache.
+    default: "false"
+outputs:
+  hit:
+    description: Whether the cache held this runner's checkpoint
+    value: ${{ steps.restore.outputs.cache-hit == 'true' }}
+runs:
+  using: composite
+  steps:
+    - name: Platform key
+      id: key
+      shell: bash
+      run: |
+        go build -o "$RUNNER_TEMP/devenv" ./cmd/devenv
+        key=$("$RUNNER_TEMP/devenv" platform key)
+        echo "key=$key" >>"$GITHUB_OUTPUT"
+        printf '| Runner | |\n| --- | --- |\n| Platform key | %s |\n' "$key" >"$RUNNER_TEMP/platform.md"
+        echo "| CPU | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs) |" >>"$RUNNER_TEMP/platform.md"
+        echo "| CPU contract | $("$RUNNER_TEMP/devenv" platform key --inputs | jq -r .contract) |" >>"$RUNNER_TEMP/platform.md"
+        echo "$EPOCHREALTIME" >"$RUNNER_TEMP/restore.start"
+    - uses: actions/cache/restore@v4
+      id: restore
+      with:
+        path: ~/.cache/devenv/platform
+        key: devenv-platform-${{ steps.key.outputs.key }}
+    - name: Record the restore
+      shell: bash
+      env:
+        HIT: ${{ steps.restore.outputs.cache-hit }}
+      run: |
+        seconds=$(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $(cat "$RUNNER_TEMP/restore.start") }")
+        if [ "$HIT" = true ]; then
+          echo "| Platform cache | hit: restored $(du -sm ~/.cache/devenv/platform | cut -f1) MiB in $seconds s |" >>"$RUNNER_TEMP/platform.md"
+        else
+          echo "| Platform cache | miss after $seconds s |" >>"$RUNNER_TEMP/platform.md"
+        fi
+    # Pull requests cannot publish a checkpoint, so this lets them start warm before one is on smol.
+    - name: devenv platform save
+      if: steps.restore.outputs.cache-hit != 'true' && inputs.save-on-miss == 'true'
+      shell: bash
+      run: |
+        start=$EPOCHREALTIME
+        "$RUNNER_TEMP/devenv" platform save 2>&1 | tee "$RUNNER_TEMP/save.log"
+        seconds=$(awk "BEGIN { printf \"%.1f\", $EPOCHREALTIME - $start }")
+        echo "| Saved in this job | $(du -sm ~/.cache/devenv/platform/*.checkpoint | cut -f1) MiB in $seconds s |" >>"$RUNNER_TEMP/platform.md"

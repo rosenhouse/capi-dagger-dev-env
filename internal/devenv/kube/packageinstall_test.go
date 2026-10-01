@@ -5,10 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
 )
@@ -52,6 +54,21 @@ func packageInstall(name, condition, usefulErrorMessage string) runtime.Object {
 func fakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{kube.PackageInstallGVR: "PackageInstallList"}, objs...)
+}
+
+func TestPackagesServed(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{kube.PackageGVR: "PackageList"})
+	if err := kube.PackagesServed(context.Background(), dyn); err != nil {
+		t.Error(err)
+	}
+
+	dyn.PrependReactor("list", "packages", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("kapp-controller is starting")
+	})
+	if err := kube.PackagesServed(context.Background(), dyn); err == nil || !strings.Contains(err.Error(), "kapp-controller is starting") {
+		t.Errorf("err = %v", err)
+	}
 }
 
 func TestPackageInstallReconciledChecksOnlyTheNamedInstall(t *testing.T) {

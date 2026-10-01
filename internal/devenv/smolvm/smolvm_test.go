@@ -497,6 +497,22 @@ func TestStartCanTurnOffIdleReclaim(t *testing.T) {
 	}
 }
 
+func TestAgentTimedOut(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		"Error: agent operation failed: wait for ready: clone agent did not respond to ping within timeout (socket_exists=false)\n": true,
+		"Error: host port 18080 is already in use\n": false,
+	} {
+		c, _ := fake{stderr: stderr, exit: 1}.start(t)
+
+		if got := smolvm.AgentTimedOut(c.Start(t.Context(), "m", smolvm.StartOptions{})); got != want {
+			t.Errorf("AgentTimedOut() = %v after %q", got, stderr)
+		}
+	}
+	if smolvm.AgentTimedOut(errors.New("clone agent did not respond to ping within timeout")) {
+		t.Error("AgentTimedOut() is true for an error that smolvm did not return")
+	}
+}
+
 func TestErrorsQuoteEmptyArguments(t *testing.T) {
 	c, _ := fake{exit: 1}.start(t)
 

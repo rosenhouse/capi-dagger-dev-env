@@ -225,13 +225,16 @@ func (e Env) ReadPorts() (Ports, error) {
 	return p, json.Unmarshal(data, &p)
 }
 
-// Kubeconfig returns the kubeconfig of the environment's mgmt or workload cluster, if its VM is running among machines.
+// Kubeconfig returns the kubeconfig of the environment's mgmt or workload cluster, if it is ready and its VM is running among machines.
 func (e Env) Kubeconfig(cluster string, machines []smolvm.Machine) ([]byte, error) {
 	if cluster != "mgmt" && cluster != "workload" {
 		return nil, fmt.Errorf("cluster %q is not mgmt or workload", cluster)
 	}
 	if !e.Running(machines) {
 		return nil, fmt.Errorf("environment %s is not running", e.Name)
+	}
+	if !e.Ready() {
+		return nil, fmt.Errorf("environment %s is not ready", e.Name)
 	}
 	kubeconfig, err := os.ReadFile(filepath.Join(e.Dir, cluster+".kubeconfig"))
 	if errors.Is(err, os.ErrNotExist) {

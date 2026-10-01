@@ -3,6 +3,7 @@ package smolvm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -77,6 +78,12 @@ func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
 		return fmt.Errorf("smolvm %s: %w", commandLine(args), ctx.Err())
 	}
 	return err
+}
+
+// AgentTimedOut reports whether a start failed because a restored machine's agent did not answer within smolvm's fixed 30 s.
+func AgentTimedOut(err error) bool {
+	var exit *ExitError
+	return errors.As(err, &exit) && strings.Contains(exit.Stderr, "agent did not respond to ping within timeout")
 }
 
 func (c CLI) Stop(ctx context.Context, name string) error {

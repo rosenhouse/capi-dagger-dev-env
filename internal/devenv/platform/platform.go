@@ -76,10 +76,12 @@ func Downloads() []infra.Download {
 
 // InstallKappController installs kapp-controller and waits for its Deployment and its aggregated Package API.
 func InstallKappController(ctx context.Context, vm *infra.VM) error {
-	return vm.Run(ctx, "kubectl apply --server-side -f "+kappControllerManifest+` >/dev/null
-kubectl -n kapp-controller rollout status deployment/kapp-controller --timeout=5m
-kubectl wait --for=condition=Available apiservice/v1alpha1.data.packaging.carvel.dev --timeout=2m`)
+	return vm.Run(ctx, kappControllerScript)
 }
+
+const kappControllerScript = "kubectl apply --server-side -f " + kappControllerManifest + ` >/dev/null
+kubectl -n kapp-controller rollout status deployment/kapp-controller --timeout=5m
+kubectl wait --for=condition=Available apiservice/v1alpha1.data.packaging.carvel.dev --timeout=2m`
 
 // InstallClusterAPI installs CAPI core, the kubeadm providers and CAPD, and waits for them.
 // clusterctl reads a local file repository and skips its version check, so it makes no GitHub API calls.
@@ -87,9 +89,23 @@ func InstallClusterAPI(ctx context.Context, vm *infra.VM) error {
 	if err := vm.WriteFile(ctx, repo+"/clusterctl.yaml", []byte(clusterctlConfig)); err != nil {
 		return err
 	}
-	return vm.Run(ctx, fmt.Sprintf("CLUSTER_TOPOLOGY=true CLUSTERCTL_DISABLE_VERSIONCHECK=true clusterctl init --config %[2]s/clusterctl.yaml "+
-		"--core cluster-api:%[1]s --bootstrap kubeadm:%[1]s --control-plane kubeadm:%[1]s --infrastructure docker:%[1]s "+
-		"--wait-providers --wait-provider-timeout 600", CAPIVersion, repo))
+	return vm.Run(ctx, clusterAPIScript)
+}
+
+var clusterAPIScript = fmt.Sprintf("CLUSTER_TOPOLOGY=true CLUSTERCTL_DISABLE_VERSIONCHECK=true clusterctl init --config %[2]s/clusterctl.yaml "+
+	"--core cluster-api:%[1]s --bootstrap kubeadm:%[1]s --control-plane kubeadm:%[1]s --infrastructure docker:%[1]s "+
+	"--wait-providers --wait-provider-timeout 600", CAPIVersion, repo)
+
+// Scripts are what this package runs and applies in the guest, for a workload cluster called cluster in namespace.
+func Scripts(cluster, namespace string) ([]string, error) {
+	crs, err := cniResourceSet(namespace, podCIDR)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		kappControllerScript, clusterctlConfig, clusterAPIScript, workloadClusterScript(cluster, namespace), string(crs),
+		fmt.Sprintf("ClusterClass in %s, whose nodes mount %s at %s", namespace, infra.ContainerdCertsDir, nodeCertsDir),
+	}, nil
 }
 
 // Apply server-side applies manifests to the management cluster.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,8 +42,27 @@ const (
 	capdLoadBalancerImage = "kindest/haproxy:v20230606-42a2262b"
 )
 
-// machineConfig sizes each environment's VM. Two fit on a 16 GB host.
-var machineConfig = smolvm.MachineConfig{CPUs: 4, MemoryMiB: 5120, StorageGiB: 40, OverlayGiB: 10}
+// images are what PullImages pulls.
+var images = []string{kindNodeImage, registryImage, socatImage, capdLoadBalancerImage}
+
+// machine sizes each environment's VM. Two fit on a 16 GB host.
+var machine = smolvm.MachineConfig{CPUs: 4, MemoryMiB: 5120, StorageGiB: 40, OverlayGiB: 10}
+
+// MachineConfig sizes a VM that publishes the guest's API servers and registry on the given host ports.
+func MachineConfig(ports state.Ports) smolvm.MachineConfig {
+	cfg := machine
+	cfg.Ports = []smolvm.Port{
+		{Host: ports.MgmtAPI, Guest: MgmtAPIPort},
+		{Host: ports.WorkloadAPI, Guest: WorkloadAPIPort},
+		{Host: ports.Registry, Guest: RegistryPort},
+	}
+	return cfg
+}
+
+// StartOptions start every VM. Branchable lets a VM be checkpointed.
+func StartOptions(branchable bool) smolvm.StartOptions {
+	return smolvm.StartOptions{Branchable: branchable, NoIdleReclaim: true}
+}
 
 // VM is an environment's machine.
 type VM struct {
@@ -53,17 +73,11 @@ type VM struct {
 }
 
 // Create creates and starts the VM, publishing the guest's API servers and registry on the given host ports.
-func (v *VM) Create(ctx context.Context, ports state.Ports) error {
-	cfg := machineConfig
-	cfg.Ports = []smolvm.Port{
-		{Host: ports.MgmtAPI, Guest: MgmtAPIPort},
-		{Host: ports.WorkloadAPI, Guest: WorkloadAPIPort},
-		{Host: ports.Registry, Guest: RegistryPort},
-	}
-	if err := v.CLI.Create(ctx, v.Name, cfg); err != nil {
+func (v *VM) Create(ctx context.Context, ports state.Ports, branchable bool) error {
+	if err := v.CLI.Create(ctx, v.Name, MachineConfig(ports)); err != nil {
 		return err
 	}
-	return v.CLI.Start(ctx, v.Name, smolvm.StartOptions{NoIdleReclaim: true})
+	return v.CLI.Start(ctx, v.Name, StartOptions(branchable))
 }
 
 func (v *VM) Delete(ctx context.Context) error {
@@ -181,24 +195,18 @@ func Downloads(goarch string) ([]Download, error) {
 }
 
 // Install installs the tools that Copy put in the guest. Each package's sha256 is pinned, so apk need not check signatures.
-func (v *VM) Install(ctx context.Context) error {
-	return v.Run(ctx, `tar -xzf /opt/devenv/docker.tgz -C /usr/local/bin --strip-components=1
-apk add --quiet --no-network --allow-untrusted /opt/devenv/apk/*.apk`)
-}
+func (v *VM) Install(ctx context.Context) error { return v.Run(ctx, installScript) }
+
+const installScript = `tar -xzf /opt/devenv/docker.tgz -C /usr/local/bin --strip-components=1
+apk add --quiet --no-network --allow-untrusted /opt/devenv/apk/*.apk`
 
 // StartDocker starts dockerd with its data on the VM's storage disk, because overlay2 cannot nest on the root overlay.
 // Without --storage-driver, a fresh Docker 29 would use the containerd image store instead of overlay2.
 func (v *VM) StartDocker(ctx context.Context) error {
-	if err := v.Run(ctx, `mkdir -p /storage/docker /var/lib/docker /storage/containerd /var/lib/containerd /lib/modules `+ContainerdCertsDir+`
-mountpoint -q /var/lib/docker || mount --bind /storage/docker /var/lib/docker
-mountpoint -q /var/lib/containerd || mount --bind /storage/containerd /var/lib/containerd
-mount --make-rshared /
-sysctl -w fs.inotify.max_user_instances=8192 >/dev/null
-sysctl -w fs.inotify.max_user_watches=1048576 >/dev/null
-rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid`); err != nil {
+	if err := v.Run(ctx, dockerSetupScript); err != nil {
 		return err
 	}
-	if _, err := v.CLI.Spawn(ctx, v.Name, []string{"sh", "-c", "exec dockerd --storage-driver=overlay2 >>/var/log/dockerd.log 2>&1"}, guestEnv); err != nil {
+	if _, err := v.CLI.Spawn(ctx, v.Name, []string{"sh", "-c", dockerdScript}, guestEnv); err != nil {
 		return err
 	}
 	return ready.Wait(ctx, ready.Gate{
@@ -207,36 +215,67 @@ rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid`); err != ni
 	})
 }
 
+const (
+	dockerSetupScript = `mkdir -p /storage/docker /var/lib/docker /storage/containerd /var/lib/containerd /lib/modules ` + ContainerdCertsDir + `
+mountpoint -q /var/lib/docker || mount --bind /storage/docker /var/lib/docker
+mountpoint -q /var/lib/containerd || mount --bind /storage/containerd /var/lib/containerd
+mount --make-rshared /
+sysctl -w fs.inotify.max_user_instances=8192 >/dev/null
+sysctl -w fs.inotify.max_user_watches=1048576 >/dev/null
+rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid`
+	dockerdScript = "exec dockerd --storage-driver=overlay2 >>/var/log/dockerd.log 2>&1"
+)
+
 // StartRegistry creates the kind network and runs the environment's registry on it at Registry, published on RegistryPort.
 // The network's dynamic range leaves out Registry's address. Containerd in every node pulls from it over plain HTTP.
-func (v *VM) StartRegistry(ctx context.Context) error {
-	return v.Run(ctx, fmt.Sprintf(`docker network create -d bridge -o com.docker.network.bridge.enable_ip_masquerade=true \
+func (v *VM) StartRegistry(ctx context.Context) error { return v.Run(ctx, registryScript) }
+
+var registryScript = fmt.Sprintf(`docker network create -d bridge -o com.docker.network.bridge.enable_ip_masquerade=true \
   -o com.docker.network.driver.mtu=1500 --subnet 172.31.0.0/16 --ip-range 172.31.0.0/17 kind >/dev/null
 docker run -d --name devenv-registry --network kind --ip %[1]s -p %[2]d:5000 %[3]s >/dev/null
 mkdir -p %[4]s/%[5]s
 cat >%[4]s/%[5]s/hosts.toml <<'EOF'
-%[6]sEOF`, registryIP, RegistryPort, registryImage, ContainerdCertsDir, Registry, hostsTOML(Registry)))
-}
+%[6]sEOF`, registryIP, RegistryPort, registryImage, ContainerdCertsDir, Registry, hostsTOML(Registry))
 
 // hostsTOML renders containerd config that pulls from registry over plain HTTP.
 func hostsTOML(registry string) string {
 	return fmt.Sprintf("server = %[1]q\n\n[host.%[1]q]\n  capabilities = [\"pull\", \"resolve\"]\n", "http://"+registry)
 }
 
-// PullImages pulls the images that the guest runs, retrying a pull that fails or stalls.
-func (v *VM) PullImages(ctx context.Context) error {
-	return v.Run(ctx, `pull() {
-  for i in 1 2 3; do timeout 300 docker pull -q "$1" >/dev/null && return; sleep 5; done
+// PullImages pulls the images that the guest runs, retrying a pull that fails or stalls for 2 minutes.
+func (v *VM) PullImages(ctx context.Context) error { return v.Run(ctx, pullScript(images, 120, 10)) }
+
+// pullScript pulls images at once. It retries a pull that fails, or that stalls: Docker's data stops growing
+// for stall seconds, which it checks every poll seconds.
+func pullScript(images []string, stall, poll int) string {
+	return fmt.Sprintf(`size() { du -sk /var/lib/docker 2>/dev/null | cut -f1 || true; }
+pull() {
+  for i in 1 2 3; do
+    docker pull -q "$1" >/dev/null & pid=$!
+    last=$(size) idle=0
+    while kill -0 $pid 2>/dev/null; do
+      sleep %[3]d
+      now=$(size)
+      if [ "$now" != "$last" ]; then last=$now idle=0; else idle=$((idle + %[3]d)); fi
+      if [ $idle -ge %[2]d ]; then
+        echo "pulling $1 stalled for %[2]d s" >&2
+        kill $pid 2>/dev/null || true
+        break
+      fi
+    done
+    wait $pid && return
+    sleep %[3]d
+  done
   echo "could not pull $1" >&2
   return 1
 }
 pids=""
-for image in `+strings.Join([]string{kindNodeImage, registryImage, socatImage, capdLoadBalancerImage}, " ")+`; do
+for image in %[1]s; do
   pull "$image" & pids="$pids $!"
 done
 status=0
 for pid in $pids; do wait "$pid" || status=1; done
-exit $status`)
+exit $status`, strings.Join(images, " "), stall, poll)
 }
 
 // The node mounts the Docker socket for CAPD, and containerd config for the environment's registry.
@@ -258,19 +297,49 @@ nodes:
 // Later guest commands use the cluster as kubectl's default.
 // CAPD's nodes ask for the node image by tag, so tagging the pinned image saves them a pull.
 func (v *VM) CreateManagementCluster(ctx context.Context) ([]byte, error) {
-	// --retain keeps the node of a failed create for ExportLogs.
-	if err := v.Run(ctx, fmt.Sprintf("kind create cluster --retain --name mgmt --image %s --config - <<'EOF'\n%sEOF\ndocker tag kindest/node@%s kindest/node:%s",
-		kindNodeImage, mgmtKindConfig, kindNodeDigest, KubernetesVersion)); err != nil {
+	if err := v.Run(ctx, mgmtClusterScript); err != nil {
 		return nil, err
 	}
-	out, err := v.Output(ctx, "kind get kubeconfig --name mgmt")
+	out, err := v.Output(ctx, mgmtKubeconfigScript)
 	return []byte(out), err
 }
 
-// ForwardWorkloadAPI publishes a CAPD cluster's API server on WorkloadAPIPort.
+// --retain keeps the node of a failed create for ExportLogs.
+var mgmtClusterScript = fmt.Sprintf("kind create cluster --retain --name mgmt --image %s --config - <<'EOF'\n%sEOF\ndocker tag kindest/node@%s kindest/node:%s",
+	kindNodeImage, mgmtKindConfig, kindNodeDigest, KubernetesVersion)
+
+const (
+	mgmtKubeconfigScript = "kind get kubeconfig --name mgmt"
+	workloadKubeconfig   = "/root/workload.kubeconfig"
+)
+
+// ForwardWorkloadAPI publishes a CAPD cluster's API server on WorkloadAPIPort, and keeps its kubeconfig in the guest.
 // CAPD's load balancer publishes it on a random port, so a forwarder on the kind network gives it a fixed one.
-func (v *VM) ForwardWorkloadAPI(ctx context.Context, cluster string) error {
-	return v.Run(ctx, fmt.Sprintf(
-		"docker rm -f %[1]s-api-forward >/dev/null 2>&1 || true\ndocker run -d --name %[1]s-api-forward --network kind -p %[2]d:6443 %[3]s TCP-LISTEN:6443,fork,reuseaddr TCP:%[1]s-lb:6443 >/dev/null",
-		cluster, WorkloadAPIPort, socatImage))
+func (v *VM) ForwardWorkloadAPI(ctx context.Context, cluster, namespace string) error {
+	return v.Run(ctx, forwardScript(cluster, namespace))
 }
+
+func forwardScript(cluster, namespace string) string {
+	return fmt.Sprintf(`docker rm -f %[1]s-api-forward >/dev/null 2>&1 || true
+docker run -d --name %[1]s-api-forward --network kind -p %[2]d:6443 %[3]s TCP-LISTEN:6443,fork,reuseaddr TCP:%[1]s-lb:6443 >/dev/null
+kubectl -n %[4]s get secret %[1]s-kubeconfig -o jsonpath='{.data.value}' | base64 -d >%[5]s`,
+		cluster, WorkloadAPIPort, socatImage, namespace, workloadKubeconfig)
+}
+
+// Kubeconfigs returns the kubeconfigs of the management cluster, and of the workload cluster that ForwardWorkloadAPI published.
+func (v *VM) Kubeconfigs(ctx context.Context) (mgmt, workload []byte, err error) {
+	m, err := v.Output(ctx, mgmtKubeconfigScript)
+	if err != nil {
+		return nil, nil, err
+	}
+	w, err := v.Output(ctx, "cat "+workloadKubeconfig)
+	return []byte(m), []byte(w), err
+}
+
+// Scripts are what the VM's methods run in the guest to set up the platform, for a workload cluster called cluster in namespace.
+func Scripts(cluster, namespace string) []string {
+	return []string{installScript, dockerSetupScript, dockerdScript, registryScript, pullScript(images, 0, 0), mgmtClusterScript, forwardScript(cluster, namespace)}
+}
+
+// Images are the images that the guest pulls.
+func Images() []string { return slices.Clone(images) }

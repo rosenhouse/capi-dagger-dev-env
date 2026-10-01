@@ -69,8 +69,47 @@ func main() {
 	}
 	for _, cmd := range []*cobra.Command{upCmd, testCmd} {
 		cmd.Flags().BoolVar(&o.Retain, "retain", false, "keep the VM if bring-up fails, for debugging")
+		cmd.Flags().BoolVar(&o.Cold, "cold", false, "bring up the platform without its checkpoint")
 		root.AddCommand(cmd)
 	}
+	platformCmd := &cobra.Command{Use: "platform", Short: "Manage the checkpoint that environments start from"}
+	var inputs bool
+	platformKeyCmd := &cobra.Command{
+		Use:   "key",
+		Short: "Print the key of this host's platform checkpoint",
+		Args:  cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			key, in, err := devenv.PlatformInputs()
+			if err != nil {
+				return err
+			}
+			if inputs {
+				_, err = fmt.Printf("%s\n", in)
+				return err
+			}
+			_, err = fmt.Println(key)
+			return err
+		},
+	}
+	platformKeyCmd.Flags().BoolVar(&inputs, "inputs", false, "print what the key hashes, as JSON")
+	var force bool
+	platformSaveCmd := &cobra.Command{
+		Use:   "save",
+		Short: "Bring up the platform in a new VM and save it as this host's platform checkpoint",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, err := devenv.SavePlatform(cmd.Context(), o, force)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Saved %s.\n", path)
+			return nil
+		},
+	}
+	platformSaveCmd.Flags().BoolVar(&force, "force", false, "replace an existing checkpoint")
+	platformSaveCmd.PreRunE = locate
+	platformCmd.AddCommand(platformKeyCmd, platformSaveCmd)
+	root.AddCommand(platformCmd)
 	root.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "List environments with the state of their VMs and their host ports",

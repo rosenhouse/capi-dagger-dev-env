@@ -37,6 +37,8 @@ type Options struct {
 	Verbose bool
 	// Retain keeps the VM of a failed bring-up, for debugging.
 	Retain bool
+	// Cold brings up the platform without its checkpoint.
+	Cold bool
 	// Progress receives one line as each stage starts, and one as it ends.
 	Progress io.Writer
 	SmolVM   smolvm.CLI
@@ -56,10 +58,12 @@ type Environment struct {
 	// bundles maps each package name to its bundle's digest reference.
 	bundles map[string]string
 
-	opts    Options
-	start   time.Time
-	vm      *infra.VM
-	closers []func() error
+	opts  Options
+	start time.Time
+	vm    *infra.VM
+	// branchable starts a new VM so that it can be checkpointed.
+	branchable bool
+	closers    []func() error
 }
 
 // open holds env and opens its guest log.
@@ -109,7 +113,7 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	if err := e.forget(); err != nil {
 		return nil, errors.Join(err, e.Close())
 	}
-	err = e.bringUp(ctx, leftover)
+	err = bringUp(e, ctx, leftover)
 	if err == nil {
 		err = e.MarkReady()
 	}
@@ -119,11 +123,19 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	return e, nil
 }
 
+// bringUp is a variable so that tests can stand in for VMs.
+var bringUp = (*Environment).bringUp
+
 // checkHost fails unless devenv has its source, smolvm's pinned version and KVM.
 func checkHost(ctx context.Context, o Options) error {
 	if o.Source == "" {
 		return errNoSource
 	}
+	return checkVM(ctx, o)
+}
+
+// checkVM fails unless the host has smolvm's pinned version and KVM.
+func checkVM(ctx context.Context, o Options) error {
 	return errors.Join(o.SmolVM.CheckVersion(ctx), checkKVM(kvmDevice))
 }
 
@@ -201,16 +213,19 @@ func (e *Environment) forget() error {
 	return os.Truncate(filepath.Join(e.Dir, "guest.log"), 0)
 }
 
-// bringUp boots the VM, then builds the first-party images while it brings up the platform, then installs them.
-// The build waits for the boot because both use every CPU, and only the boot is on the critical path.
+// bringUp brings up the platform while it builds the first-party images, then installs them.
+// The build waits for the VM to start, because both use every CPU, and smolvm gives a VM only 30 s to answer.
 func (e *Environment) bringUp(ctx context.Context, leftover smolvm.State) error {
-	if err := e.boot(ctx, leftover); err != nil {
-		return err
-	}
+	started := make(chan struct{})
 	var a artifacts
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return e.platform(gctx) })
+	g.Go(func() error { return e.platform(gctx, leftover, sync.OnceFunc(func() { close(started) })) })
 	g.Go(func() error {
+		select {
+		case <-started:
+		case <-gctx.Done():
+			return gctx.Err()
+		}
 		return e.stage("build images", func() (err error) { a, err = e.build(gctx, ""); return err })
 	})
 	if err := g.Wait(); err != nil {

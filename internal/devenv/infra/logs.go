@@ -25,8 +25,13 @@ func (v *VM) ExportLogs(ctx context.Context, dir, cluster, namespace string) err
 	return errors.Join(err, v.exportGuestLogs(ctx, dir, cluster, namespace))
 }
 
-// collectLogs writes logs to the current directory, cheapest first, and bounds each call to an API server.
-const collectLogs = `cp /var/log/dockerd.log . 2>/dev/null
+// collectLogs writes logs to the current directory. With "api", it writes what the API servers say, cheapest first,
+// and bounds each call. With "kind", it exports the logs of every Kind and CAPD cluster.
+const collectLogs = `if [ "$1" = kind ]; then
+  for c in $(kind get clusters 2>/dev/null); do timeout 60 kind export logs "$c" --name "$c" >/dev/null 2>&1; done
+  exit
+fi
+cp /var/log/dockerd.log . 2>/dev/null
 free -m >free.txt 2>&1
 dmesg >dmesg.txt 2>&1
 docker ps -a >docker-ps.txt 2>&1
@@ -44,7 +49,6 @@ if k get --raw=/readyz >/dev/null 2>&1; then
     k --kubeconfig /tmp/workload.kubeconfig get events -A --sort-by=.lastTimestamp >workload-events.txt 2>&1
   fi
 fi
-for c in $(kind get clusters 2>/dev/null); do timeout 60 kind export logs "$c" --name "$c" >/dev/null 2>&1; done
 `
 
 func (v *VM) exportGuestLogs(ctx context.Context, dir, cluster, namespace string) error {
@@ -52,7 +56,8 @@ func (v *VM) exportGuestLogs(ctx context.Context, dir, cluster, namespace string
 		return err
 	}
 	if err := v.Run(ctx, fmt.Sprintf(`rm -rf /tmp/devenv-logs && mkdir /tmp/devenv-logs && cd /tmp/devenv-logs
-CLUSTER=%s NAMESPACE=%s CLUSTERCTL_DISABLE_VERSIONCHECK=true timeout 150 sh /tmp/devenv-collect-logs.sh || true
+CLUSTER=%s NAMESPACE=%s CLUSTERCTL_DISABLE_VERSIONCHECK=true timeout 90 sh /tmp/devenv-collect-logs.sh api || true
+timeout 120 sh /tmp/devenv-collect-logs.sh kind || true
 tar -czf /tmp/devenv-logs.tgz .`, cluster, namespace)); err != nil {
 		return err
 	}
