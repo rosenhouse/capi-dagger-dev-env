@@ -20,6 +20,7 @@ import (
 
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/build"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/bundle"
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/kube"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/platform"
@@ -46,6 +47,8 @@ type Environment struct {
 
 	opts     Options
 	start    time.Time
+	ctx      context.Context
+	cancel   context.CancelFunc
 	infra    *infra.Infra
 	registry *infra.Registry
 	mirrors  infra.Mirrors
@@ -54,6 +57,20 @@ type Environment struct {
 
 // Up brings up an environment and waits for its readiness gates.
 func Up(ctx context.Context, o Options) (*Environment, error) {
+	e, err := start(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.bringUp(e.ctx); err != nil {
+		e.ExportLogs()
+		e.Close()
+		return nil, fmt.Errorf("%w\nlogs: %s", err, e.Dir)
+	}
+	return e, nil
+}
+
+// start locks the environment and serves its control socket.
+func start(ctx context.Context, o Options) (*Environment, error) {
 	env, err := state.New(o.StateDir, o.Name)
 	if err != nil {
 		return nil, err
@@ -62,13 +79,28 @@ func Up(ctx context.Context, o Options) (*Environment, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &Environment{Env: env, opts: o, start: time.Now(), closers: []func() error{func() error { unlock(); return nil }}}
-	if err := e.bringUp(ctx); err != nil {
-		e.ExportLogs()
+	ctx, cancel := context.WithCancel(ctx)
+	e := &Environment{Env: env, opts: o, start: time.Now(), ctx: ctx, cancel: cancel,
+		closers: []func() error{func() error { cancel(); unlock(); return nil }}}
+	listening, served := make(chan struct{}), make(chan error, 1)
+	go func() { served <- control.Serve(ctx, env.SocketPath(), e.handlers(), func() { close(listening) }) }()
+	select {
+	case <-listening:
+	case err := <-served:
 		e.Close()
-		return nil, fmt.Errorf("%w\nlogs: %s", err, env.Dir)
+		return nil, fmt.Errorf("control socket: %w", err)
 	}
+	e.closers = append([]func() error{func() error { cancel(); return <-served }}, e.closers...)
 	return e, nil
+}
+
+// Context lasts until the environment is interrupted, asked to stop, or closed.
+func (e *Environment) Context() context.Context { return e.ctx }
+
+func (e *Environment) handlers() map[string]control.Handler {
+	return map[string]control.Handler{
+		"down": func(context.Context, []string, io.Writer) error { e.cancel(); return nil },
+	}
 }
 
 func (e *Environment) bringUp(ctx context.Context) error {

@@ -2,30 +2,51 @@ package devenv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 	"time"
 
 	"dagger.io/dagger"
 
+	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/control"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/infra"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/ready"
 	"github.com/rosenhouse/capi-dagger-dev-env/internal/devenv/state"
 )
 
-// Down stops the environment's up process. With purge, it also deletes the environment's Docker data and state.
-func Down(ctx context.Context, o Options, purge bool) error {
-	env, err := state.Existing(o.StateDir, o.Name)
+// Down asks the environment's up process to stop and waits for it to exit.
+func Down(ctx context.Context, env state.Env, out io.Writer) error {
+	running, err := env.Running()
 	if err != nil {
 		return err
 	}
-	if err := stop(ctx, env, 2*time.Minute); err != nil {
+	if !running {
+		fmt.Fprintf(out, "Environment %s is not running.\n", env.Name)
+		return nil
+	}
+	fmt.Fprintf(out, "Stopping environment %s.\n", env.Name)
+	if err := control.Request(ctx, env.SocketPath(), "down", out); err != nil {
 		return err
 	}
-	if !purge {
-		return nil
+	return ready.Wait(ctx, ready.Gate{
+		Name: fmt.Sprintf("environment %s stopped", env.Name), Timeout: 5 * time.Minute, Interval: 100 * time.Millisecond,
+		Check: func(context.Context) error {
+			if running, err := env.Running(); err != nil || running {
+				return errors.Join(errors.New("up still holds the environment's lock"), err)
+			}
+			return nil
+		},
+	})
+}
+
+// Purge deletes a stopped environment's Docker data and state.
+func Purge(ctx context.Context, env state.Env) error {
+	if running, err := env.Running(); err != nil {
+		return err
+	} else if running {
+		return fmt.Errorf("environment %s is running", env.Name)
 	}
 	c, err := dagger.Connect(ctx, dagger.WithLogOutput(io.Discard))
 	if err != nil {
@@ -36,24 +57,4 @@ func Down(ctx context.Context, o Options, purge bool) error {
 		return fmt.Errorf("purge Docker data: %w", err)
 	}
 	return os.RemoveAll(env.Dir)
-}
-
-// stop sends SIGTERM to the process holding env and waits for it to release the lock.
-func stop(ctx context.Context, env state.Env, timeout time.Duration) error {
-	pid, err := env.Holder()
-	if err != nil || pid == 0 {
-		return err
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("signal up (pid %d): %w", pid, err)
-	}
-	return ready.Wait(ctx, ready.Gate{
-		Name: fmt.Sprintf("environment %s stopped", env.Name), Timeout: timeout, Interval: 100 * time.Millisecond,
-		Check: func(context.Context) error {
-			if pid, err := env.Holder(); err != nil || pid != 0 {
-				return fmt.Errorf("pid %d still running: %v", pid, err)
-			}
-			return nil
-		},
-	})
 }

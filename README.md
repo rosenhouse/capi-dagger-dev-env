@@ -17,10 +17,11 @@ go run ./cmd/devenv up           # holds the environment until Ctrl-C
 go run ./cmd/devenv test         # brings up an environment, verifies it, and tears it down
 go run ./cmd/devenv status       # lists environments and whether each is running
 go run ./cmd/devenv kubeconfig --cluster workload > workload.kubeconfig
-go run ./cmd/devenv down --purge # stops an environment and deletes its cached Docker data
+go run ./cmd/devenv down --purge # stops an environment and deletes its cached Docker data and state
 ```
 
 Each environment keeps its kubeconfigs and logs in `.devenv/<name>/`.
+Without `--name`, `status`, `kubeconfig` and `down` act on the only environment, or else the only running one.
 Reusing a name with `--name` reuses that environment's cached images.
 API server tunnels listen on all host interfaces.
 A failure names the stage and the readiness gate that failed.

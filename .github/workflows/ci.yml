@@ -35,7 +35,7 @@ jobs:
       - run: go run ./cmd/devenv test --name ci
       # A second run with the same name checks cleanup, lock release and cache reuse.
       - run: go run ./cmd/devenv test --name ci
-      - run: go run ./cmd/devenv down --name ci --purge
+      - run: go run ./cmd/devenv down --name ci --purge && test ! -e .devenv/ci
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

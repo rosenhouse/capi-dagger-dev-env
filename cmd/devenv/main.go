@@ -22,7 +22,7 @@ import (
 func main() {
 	o := devenv.Options{Progress: os.Stderr}
 	root := &cobra.Command{Use: "devenv", SilenceUsage: true}
-	root.PersistentFlags().StringVar(&o.Name, "name", "", "environment name (default: random); reusing a name reuses its cached images")
+	root.PersistentFlags().StringVar(&o.Name, "name", "", "environment name; up and test pick a random one if empty, and reusing a name reuses its cached images")
 	root.PersistentFlags().StringVar(&o.StateDir, "state-dir", ".devenv", "directory for kubeconfigs and logs")
 	root.PersistentFlags().BoolVarP(&o.Verbose, "verbose", "v", false, "stream Dagger logs to stderr")
 
@@ -37,7 +37,7 @@ func main() {
 			}
 			fmt.Printf("Environment %s is up.\n  management: export KUBECONFIG=%s\n  workload:   export KUBECONFIG=%s\nPress Ctrl-C to tear it down.\n",
 				env.Name, env.MgmtKubeconfig, env.WorkloadKubeconfig)
-			<-cmd.Context().Done()
+			<-env.Context().Done()
 			return env.Close()
 		},
 	})
@@ -50,9 +50,9 @@ func main() {
 			if err != nil {
 				return err
 			}
-			testErr := env.Verify(cmd.Context())
+			testErr := env.Verify(env.Context())
 			if testErr == nil {
-				testErr = e2e.GreetingReachesWorkloadCluster(cmd.Context(), env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
+				testErr = e2e.GreetingReachesWorkloadCluster(env.Context(), env.MgmtKubeconfig, env.WorkloadKubeconfig, devenv.WorkloadNamespace, devenv.WorkloadCluster)
 			}
 			if testErr != nil {
 				env.ExportLogs()
@@ -78,15 +78,15 @@ func main() {
 			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tSTATE\tKUBECONFIGS")
 			for _, env := range envs {
-				pid, err := env.Holder()
+				running, err := env.Running()
 				if err != nil {
 					return err
 				}
-				status := "stopped"
-				if pid != 0 {
-					status = fmt.Sprintf("running (pid %d)", pid)
+				status, kubeconfigs := "stopped", []string(nil)
+				if running {
+					status = "running"
+					kubeconfigs, _ = filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
 				}
-				kubeconfigs, _ := filepath.Glob(filepath.Join(env.Dir, "*.kubeconfig"))
 				fmt.Fprintf(w, "%s\t%s\t%s\n", env.Name, status, strings.Join(kubeconfigs, " "))
 			}
 			return w.Flush()
@@ -102,10 +102,7 @@ func main() {
 			if err != nil {
 				return err
 			}
-			kubeconfig, err := os.ReadFile(filepath.Join(env.Dir, cluster+".kubeconfig"))
-			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("environment %s has no %s kubeconfig; is it up?", env.Name, cluster)
-			}
+			kubeconfig, err := env.Kubeconfig(cluster)
 			if err != nil {
 				return err
 			}
@@ -121,7 +118,14 @@ func main() {
 		Short: "Stop a running environment",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return devenv.Down(cmd.Context(), o, purge)
+			env, err := state.Existing(o.StateDir, o.Name)
+			if err != nil {
+				return err
+			}
+			if err := devenv.Down(cmd.Context(), env, os.Stderr); err != nil || !purge {
+				return err
+			}
+			return devenv.Purge(cmd.Context(), env)
 		},
 	}
 	downCmd.Flags().BoolVar(&purge, "purge", false, "also delete the environment's cached Docker data and state")

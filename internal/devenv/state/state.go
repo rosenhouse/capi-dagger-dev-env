@@ -7,12 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/clientcmd"
@@ -44,6 +43,7 @@ func New(root, name string) (Env, error) {
 }
 
 // Lock fails if another process holds the environment. The lock lasts until unlock or process exit.
+// It retries briefly, because Running probes the lock.
 func (e Env) Lock() (unlock func(), err error) {
 	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
 		return nil, err
@@ -52,46 +52,63 @@ func (e Env) Lock() (unlock func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	for range 5 {
+		if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, fmt.Errorf("environment %s is already running", e.Name)
 		}
 		return nil, err
 	}
-	if err := f.Truncate(0); err != nil {
-		f.Close()
-		return nil, err
-	}
-	if _, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0); err != nil {
-		f.Close()
-		return nil, err
-	}
 	return func() { f.Close() }, nil
 }
 
-// Holder returns the ID of the process that holds the environment's lock, or 0 if none does.
-func (e Env) Holder() (int, error) {
+// Running reports whether a process holds the environment's lock.
+func (e Env) Running() (bool, error) {
 	f, err := os.Open(filepath.Join(e.Dir, "lock"))
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return false, nil
 	}
 	if err != nil {
-		return 0, err
+		return false, err
 	}
 	defer f.Close()
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
-	if err == nil {
-		return 0, nil
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true, nil
 	}
-	if !errors.Is(err, syscall.EWOULDBLOCK) {
-		return 0, err
+	return false, err
+}
+
+// SocketPath is where the environment's up process listens for requests.
+// It lives in the temporary directory, under a hash of Dir, because Unix socket paths are short on macOS.
+func (e Env) SocketPath() string {
+	dirHash := sha256.Sum256([]byte(e.Dir))
+	return filepath.Join(os.TempDir(), "devenv-"+hex.EncodeToString(dirHash[:8])+".sock")
+}
+
+// Kubeconfig returns the kubeconfig of the running environment's mgmt or workload cluster.
+func (e Env) Kubeconfig(cluster string) ([]byte, error) {
+	if cluster != "mgmt" && cluster != "workload" {
+		return nil, fmt.Errorf("cluster %q is not mgmt or workload", cluster)
 	}
-	pid, err := io.ReadAll(f)
+	running, err := e.Running()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return strconv.Atoi(string(pid))
+	if !running {
+		return nil, fmt.Errorf("environment %s is not running", e.Name)
+	}
+	kubeconfig, err := os.ReadFile(filepath.Join(e.Dir, cluster+".kubeconfig"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("environment %s has no %s kubeconfig yet", e.Name, cluster)
+	}
+	return kubeconfig, err
 }
 
 // List returns the environments under root, sorted by name.
@@ -117,24 +134,31 @@ func List(root string) ([]Env, error) {
 	return envs, nil
 }
 
-// Existing returns the environment called name under root, or the only one there if name is empty.
+// Existing returns the environment called name under root. If name is empty,
+// it returns the only environment there, or else the only running one.
 func Existing(root, name string) (Env, error) {
+	if name != "" {
+		return New(root, name)
+	}
 	envs, err := List(root)
 	if err != nil {
 		return Env{}, err
 	}
-	if name == "" {
-		if len(envs) != 1 {
-			return Env{}, fmt.Errorf("found %d environments in %s; pass --name", len(envs), root)
-		}
+	if len(envs) == 1 {
 		return envs[0], nil
 	}
+	var running []Env
 	for _, env := range envs {
-		if env.Name == name {
-			return env, nil
+		if ok, err := env.Running(); err != nil {
+			return Env{}, err
+		} else if ok {
+			running = append(running, env)
 		}
 	}
-	return Env{}, fmt.Errorf("no environment %s in %s", name, root)
+	if len(running) == 1 {
+		return running[0], nil
+	}
+	return Env{}, fmt.Errorf("found %d environments in %s, %d of them running; pass --name", len(envs), root, len(running))
 }
 
 // WriteKubeconfig points kubeconfig at a localhost port, names its entries <env>-<cluster>, and writes it to the env dir.
