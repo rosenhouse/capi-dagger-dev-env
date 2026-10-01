@@ -98,14 +98,18 @@ resources() { # label machine-to-inspect
 	free -m
 	metric "host memory used, available, swap used ($1)" \
 		"$(free -m | awk '/^Mem:/ { m = $3 " MiB, " $7 " MiB" } /^Swap:/ { s = $3 " MiB" } END { print m ", " s }')"
-	metric "host Shmem, AnonPages, Mapped, Cached, Dirty ($1)" \
-		"$(awk '/^(Shmem|AnonPages|Mapped|Cached|Dirty):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' /proc/meminfo)"
+	host_meminfo "$1"
 	for m in $(smolvm machine ls -q); do
 		vmm_memory "$m" "$1"
 		metric "host disk of $m ($1)" "$(du -sm "$(smolvm machine data-dir --name "$m")" | cut -f1) MiB"
 	done
 	guest "$2" resources "$1"
 	cpu_probe "$2" "$1"
+}
+
+host_meminfo() { # label
+	metric "host MemAvailable, Shmem, AnonPages, Mapped, Cached, Dirty ($1)" \
+		"$(awk '/^(MemAvailable|Shmem|AnonPages|Mapped|Cached|Dirty):/ { printf "%s%d MiB", sep, $2 / 1024; sep = ", " }' /proc/meminfo)"
 }
 
 vmm_memory() { # machine label
@@ -185,8 +189,11 @@ guest_avail() { smolvm machine exec --name "$1" -- awk '/^MemAvailable:/ { print
 # Filling all free guest RAM at once got the runner killed.
 zero_fill() {
 	local i=0 rss0 t0
+	host_meminfo "before guest drop_caches"
 	smolvm machine exec --name $PLAT -- sh -c 'sync; echo 3 >/proc/sys/vm/drop_caches; mkdir -p /mnt/zero; mount -t tmpfs -o size=100% zero /mnt/zero'
-	vmm_memory $PLAT "after guest drop_caches"
+	sleep 10
+	host_meminfo "10 s after guest drop_caches"
+	vmm_memory $PLAT "10 s after guest drop_caches"
 	rss0=$(vmm_rss $PLAT)
 	t0=$(now)
 	while (($(host_avail) > 4096 && $(guest_avail $PLAT) > 2048)); do
