@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Host side of the platform spike: run.sh <stage>. Stages run in workflow order.
-# Measurements accumulate in $METRICS; the summary stage writes them to the step summary.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -12,10 +11,7 @@ BUSYBOX=busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445
 OUT=$RUNNER_TEMP/platform
 METRICS=$OUT/metrics.md
 mkdir -p "$OUT"
-
-metric() { echo "metric: $1 = $2"; echo "| $1 | $2 |" >>"$METRICS"; }
-now() { date +%s.%N; }
-since() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f s", b - a }'; }
+. ./lib.sh
 
 timed() { # name command...
 	local name=$1 t0
@@ -23,15 +19,6 @@ timed() { # name command...
 	t0=$(now)
 	"$@"
 	metric "$name" "$(since "$t0")"
-}
-
-retry() { # seconds command...
-	local end=$((SECONDS + $1))
-	shift
-	until "$@"; do
-		((SECONDS < end)) || return 1
-		sleep 2
-	done
 }
 
 # guest <machine> <stage> [arg]: runs a guest.sh stage and records its metric lines.
@@ -58,7 +45,6 @@ boot() {
 	metric "runner CPU" "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
 	metric "smolvm" "$(smolvm --version)"
 	metric "host THP shmem_enabled" "$(cat /sys/kernel/mm/transparent_hugepage/shmem_enabled)"
-	metric "host swap" "$(free -m | awk '/^Swap:/ { print $2 " MiB" }')"
 	grep -H . /sys/module/kvm*/parameters/* 2>/dev/null || true
 	smolvm machine create --name $SRC --net --net-backend virtio-net --cpus 4 --mem 12288 --storage 40 --overlay 10
 	timed "first start of the bare VM (--branchable)" smolvm machine start --name $SRC --branchable
@@ -96,7 +82,6 @@ resources() { # label machine-to-inspect
 	metric "host ShmemHugePages ($1)" "$(awk '/^ShmemHugePages:/ { print int($2 / 1024) " MiB" }' /proc/meminfo)"
 	for m in $(smolvm machine ls -q); do
 		pid=$(smolvm machine status --name "$m" --json | jq -r .pid)
-		# A branch child's VMM is not readable by its own user.
 		sudo cat "/proc/$pid/smaps_rollup" >"$OUT/smaps-$m-$1.txt"
 		grep -E '^(Rss|Pss|Pss_Anon|Pss_Shmem):' "$OUT/smaps-$m-$1.txt"
 		metric "VMM $m Rss, Pss, Pss_Shmem ($1)" \
@@ -109,10 +94,9 @@ resources() { # label machine-to-inspect
 
 # cpu_probe <machine> <label>: guest CPU use, and the guest clock against the host's.
 cpu_probe() {
-	local host guest
-	host=$(date +%s)
-	guest=$(smolvm machine exec --name "$1" -- date +%s)
-	metric "guest clock minus host clock ($2)" "$((guest - host)) s"
+	local offset
+	offset=$(clock_offset "$1")
+	metric "guest clock minus host clock ($2)" "$offset"
 	guest "$1" cpu-probe "$2"
 }
 
@@ -126,22 +110,15 @@ branch() {
 		fi
 	done
 	vmstat -t 5 >"$OUT/vmstat.log" 2>&1 &
+	echo $! >"$OUT/vmstat.pid"
 	timed "branch --freeze-source with 3 published ports" smolvm machine branch --from $SRC --name $ENV --freeze-source \
 		-p $H_MGMT:6443 -p $H_WORK:7443 -p $H_REG:5000
 	now >"$OUT/branched-at"
 	vmm_stat $ENV >"$OUT/env-stat-at-branch"
 	monitor >"$OUT/monitor.log" 2>&1 &
+	echo $! >"$OUT/monitor.pid"
 	metric "source state after branch" "$(smolvm machine status --name $SRC --json | jq -r .state)"
 	smolvm machine ls -v
-	cpu_probe $ENV "just after branch"
-}
-
-# vmm_stat <machine> prints the VMM's minor faults, major faults and CPU seconds.
-# The process name has a space, so fields count from after its closing parenthesis.
-vmm_stat() {
-	local pid
-	pid=$(smolvm machine status --name "$1" --json | jq -r .pid)
-	sudo cat "/proc/$pid/stat" | sed 's/.*) //' | awk '{ printf "%d %d %.1f\n", $8, $10, ($12 + $13) / 100 }'
 }
 
 monitor() {
@@ -187,14 +164,18 @@ kubectl_works() { # cluster local-port
 	metric "$1: kubectl logs, exec and port-forward from the host" ok
 }
 
+# Polls both API servers from the branch time on. A curl attempt takes up to 5 s, then waits 2 s.
 host_access() {
-	local t0 mgmt work
+	local t0 probe mgmt work
 	t0=$(cat "$OUT/branched-at")
+	cpu_probe $ENV "just after branch" &
+	probe=$!
 	wait_readyz mgmt $H_MGMT "$t0" &
 	mgmt=$!
 	wait_readyz work $H_WORK "$t0" &
 	work=$!
-	wait $mgmt
+	wait $probe
+	wait $mgmt || { kill $work; return 1; }
 	wait $work
 	metric "env VMM minor faults, major faults, CPU s from branch to both /readyz" \
 		"$(echo "$(cat "$OUT/env-stat-at-branch") $(vmm_stat $ENV)" | awk '{ printf "%d, %d, %.1f s", $4 - $1, $5 - $2, $6 - $3 }')"
@@ -205,6 +186,7 @@ host_access() {
 	timed "work kubectl checks from the host" kubectl_works work 18182
 	timed "Cluster work Available from the host" \
 		kubectl --kubeconfig "$OUT/mgmt.kubeconfig" -n default wait --for=condition=Available cluster/work --timeout=10m
+	kill "$(cat "$OUT/monitor.pid")" "$(cat "$OUT/vmstat.pid")"
 	cat "$OUT/monitor.log" "$OUT/vmstat.log"
 }
 
@@ -225,16 +207,6 @@ registry() {
 			kubectl --kubeconfig "$OUT/$c.kubeconfig" wait --for=condition=Ready pod/spike-registry --timeout=3m
 		metric "$c pod imageID" "$(kubectl --kubeconfig "$OUT/$c.kubeconfig" get pod spike-registry -o jsonpath='{.status.containerStatuses[0].imageID}')"
 	done
-}
-
-summary() {
-	{
-		echo "### Platform spike"
-		echo
-		echo "| measurement | value |"
-		echo "| --- | --- |"
-		cat "$METRICS"
-	} | tee -a "$GITHUB_STEP_SUMMARY"
 }
 
 diag() {

@@ -35,7 +35,7 @@ fetch() { # url sha256 dest
 }
 
 install() {
-	apk add -q curl iptables nftables conntrack-tools
+	retry 120 apk add -q curl iptables nftables conntrack-tools
 	t0=$(now)
 	fetch https://download.docker.com/linux/static/stable/x86_64/docker-29.8.2.tgz \
 		995d1ef289677f74fd58d8d2c35727b6a4ee389c69db8638a3e42d0487aa5b0f /tmp/docker.tgz
@@ -118,7 +118,6 @@ docker_facts() {
 	metric "guest kernel" "$(uname -r)"
 }
 
-# From research kernel-kind.md §11. Expected FAILs: recent, physdev, ct label, queue, ctnetlink.
 kernel_probe() {
 	set +e
 	out=$(probe 2>&1)
@@ -248,18 +247,29 @@ cpu_probe() {
 	sleep 10
 	head -1 /proc/stat >/tmp/stat1
 	cpu_ticks >/tmp/ticks1
-	metric "guest CPU user, system, irq, softirq, idle, steal ($1)" "$(cat /tmp/stat0 /tmp/stat1 | awk '
+	metric "guest CPU user, system, iowait, irq, softirq, idle, steal ($1)" "$(cat /tmp/stat0 /tmp/stat1 | awk '
 		NR == 1 { for (i = 2; i <= 9; i++) a[i] = $i; next }
 		{ for (i = 2; i <= 9; i++) { d[i] = $i - a[i]; t += d[i] } }
-		END { printf "%d%%, %d%%, %d%%, %d%%, %d%%, %d%%", 100*d[2]/t, 100*d[4]/t, 100*d[7]/t, 100*d[8]/t, 100*d[5]/t, 100*d[9]/t }')"
-	metric "busiest guest processes, CPU s in 10 s ($1)" "$(awk 'NR == FNR { a[$1] = $2; next } ($1 in a) && $2 > a[$1] { print $2 - a[$1], $3 }' /tmp/ticks0 /tmp/ticks1 |
-		sort -rn | head -6 | awk '{ printf "%s%s %.1f", sep, $2, $1 / 100; sep = ", " }')"
+		END { printf "%d%%, %d%%, %d%%, %d%%, %d%%, %d%%, %d%%", 100*d[2]/t, 100*d[4]/t, 100*d[6]/t, 100*d[7]/t, 100*d[8]/t, 100*d[5]/t, 100*d[9]/t }')"
+	metric "busiest guest processes@container, CPU s in 10 s ($1)" "$(busiest)"
 	dmesg | tail -5
 }
 
 cpu_ticks() { # pid utime+stime comm
 	cat /proc/[0-9]*/stat 2>/dev/null | sed 's/^\([0-9]*\) (\(.*\)) /\1 \2 /' |
 		awk '{ n = NF; print $1, $(n - 38) + $(n - 37), $2 }'
+}
+
+busiest() {
+	awk 'NR == FNR { a[$1] = $2; next } ($1 in a) && $2 > a[$1] { print $2 - a[$1], $1, $3 }' /tmp/ticks0 /tmp/ticks1 |
+		sort -rn | head -6 | while read -r ticks pid comm; do
+			echo "$ticks $comm@$(container_of "$pid")"
+		done | awk '{ printf "%s%s %.1f", sep, $2, $1 / 100; sep = ", " }'
+}
+
+container_of() { # pid
+	id=$(sed -n 's|^0::/docker/\([0-9a-f]\{12\}\).*|\1|p' "/proc/$1/cgroup" 2>/dev/null)
+	if [ -n "$id" ]; then docker ps --filter "id=$id" --format '{{.Names}}'; else echo vm; fi
 }
 
 restarts() {

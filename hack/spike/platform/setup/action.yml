@@ -1,0 +1,23 @@
+name: smolvm host setup
+description: Sets shmem THP, enables KVM and installs smolvm $SMOLVM_VERSION, as ci.yml does.
+inputs:
+  shmem-thp:
+    description: Value for /sys/kernel/mm/transparent_hugepage/shmem_enabled, which governs memfd guest RAM.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo ${{ inputs.shmem-thp }} | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
+    - name: Enable KVM
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -l /dev/kvm
+    - name: Install smolvm
+      shell: bash
+      run: |
+        curl -fsSL "https://raw.githubusercontent.com/smol-machines/smolvm/v${SMOLVM_VERSION}/scripts/install.sh" | bash -s -- --version "$SMOLVM_VERSION"
+        echo "$HOME/.smolvm" >> "$GITHUB_PATH"
