@@ -78,7 +78,7 @@ jobs:
             sed -nE 's/^\[ *[0-9.]+s\] (.+): ([0-9.]+)s$/| \1 | \2 |/p' "$RUNNER_TEMP/$run.log"
             sed -nE 's/^\[ *([0-9.]+)s\] workload packages: .*/| **up** | **\1** |/p' "$RUNNER_TEMP/$run.log"
             [ -f "$RUNNER_TEMP/$run.seconds" ] && echo "| **devenv test** | **$(cat "$RUNNER_TEMP/$run.seconds")** |"
-          done >>"$GITHUB_STEP_SUMMARY"
+          done | tee -a "$GITHUB_STEP_SUMMARY"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -95,20 +95,21 @@ jobs:
       - name: Two environments at once, one with a random name
         timeout-minutes: 30
         run: |
-          echo "### Two environments at once" >>"$GITHUB_STEP_SUMMARY"
-          echo "Before: $(free -m | awk '/^Mem:/ { print $3 }') MiB of memory and $(df --output=used -BG / | tail -1 | tr -d ' ') of disk used." >>"$GITHUB_STEP_SUMMARY"
+          say() { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          say "### Two environments at once"
+          say "Before: $(free -m | awk '/^Mem:/ { print $3 }') MiB of memory and $(df --output=used -BG / | tail -1 | tr -d ' ') of disk used."
           (while sleep 5; do echo "$(free -m | awk '/^Mem:/ { print $3 }') $(df --output=used -BG / | tail -1 | tr -d ' G')"; done >"$RUNNER_TEMP/usage.log") &
           "$RUNNER_TEMP/devenv" test --name a 2>&1 | sed -u 's/^/[a] /' | tee "$RUNNER_TEMP/a.log" & a=$!
           "$RUNNER_TEMP/devenv" test 2>&1 | sed -u 's/^/[random] /' | tee "$RUNNER_TEMP/random.log" & r=$!
           status=0
           wait $a || status=1
           wait $r || status=1
-          echo "Peak: $(sort -n "$RUNNER_TEMP/usage.log" | tail -1 | cut -d' ' -f1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used," \
-            "$(cut -d' ' -f2 "$RUNNER_TEMP/usage.log" | sort -n | tail -1) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk." >>"$GITHUB_STEP_SUMMARY"
+          say "Peak: $(sort -n "$RUNNER_TEMP/usage.log" | tail -1 | cut -d' ' -f1) MiB of $(free -m | awk '/^Mem:/ { print $2 }') MiB memory used," \
+            "$(cut -d' ' -f2 "$RUNNER_TEMP/usage.log" | sort -n | tail -1) GB of $(df --output=size -BG / | tail -1 | tr -d ' ') disk."
           for env in a random; do
-            echo "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s." >>"$GITHUB_STEP_SUMMARY"
+            say "$env: up in $(sed -nE 's/^\[[a-z]+\] \[ *([0-9.]+)s\] workload packages: .*/\1/p' "$RUNNER_TEMP/$env.log") s."
           done
-          echo "Both tests took $SECONDS s." >>"$GITHUB_STEP_SUMMARY"
+          say "Both tests took $SECONDS s."
           exit $status
       - run: test "$(ls .devenv)" = a
       - if: failure()
