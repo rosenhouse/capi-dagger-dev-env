@@ -3,7 +3,6 @@ package smolvm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -50,13 +49,15 @@ func (c CLI) RebindPorts(ctx context.Context, name string, remove, add []Port) e
 }
 
 type StartOptions struct {
-	// Branchable lets the machine be branched and checkpointed.
+	// Branchable lets the machine be branched and checkpointed. A machine created from a checkpoint is branchable without it.
 	Branchable bool
 }
 
 // Start boots a machine, or resumes a machine created from a checkpoint.
+// A cancelled Start can leave the machine running, so the caller should delete it.
 func (c CLI) Start(ctx context.Context, name string, opts StartOptions) error {
-	args := []string{"machine", "start", "--name", name}
+	// A bare VM pulls no image. Without --proxy, smolvm fails if the host's proxy listens only on loopback.
+	args := []string{"machine", "start", "--name", name, "--proxy", ""}
 	if opts.Branchable {
 		args = append(args, "--branchable")
 	}
@@ -83,7 +84,7 @@ func (c CLI) Delete(ctx context.Context, name string, opts DeleteOptions) error 
 type BranchOptions struct {
 	// FreezeSource pauses the source for good, as a base for more branches.
 	FreezeSource bool
-	// Ports publishes the branch's guest ports. Without them, smolvm picks random host ports for the source's.
+	// With Ports, the branch publishes only these. Without them, smolvm republishes the source's guest ports on free host ports.
 	Ports []Port
 }
 
@@ -139,40 +140,52 @@ type ExecOptions struct {
 	Env            []string
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
-	// Timeout makes smolvm kill the command and exit 124.
+	// A positive Timeout makes smolvm kill the command and exit 124.
 	Timeout time.Duration
-	// Detach leaves the command running in the background, without Stdin or Timeout. smolvm prints its guest PID.
-	Detach bool
 }
 
 // Exec runs argv in a running machine. A nonzero exit returns an *ExitError.
 func (c CLI) Exec(ctx context.Context, name string, argv []string, opts ExecOptions) error {
-	if opts.Detach && (opts.Stdin != nil || opts.Timeout != 0) {
-		return errors.New("smolvm: a detached Exec takes no Stdin or Timeout")
-	}
-	args := []string{"machine", "exec", "--name", name}
-	for _, env := range opts.Env {
-		args = append(args, "-e", env)
-	}
+	args := execArgs(name, opts.Env)
 	if opts.Timeout > 0 {
 		args = append(args, "--timeout", fmt.Sprintf("%dms", (opts.Timeout+time.Millisecond-1)/time.Millisecond))
 	}
-	switch {
-	case opts.Detach:
-		args = append(args, "-d")
-	case opts.Stdin != nil:
+	if opts.Stdin != nil {
 		args = append(args, "-i")
-	default:
+	} else {
 		args = append(args, "--stream")
 	}
 	return c.run(ctx, append(append(args, "--"), argv...), opts.Stdin, opts.Stdout, opts.Stderr)
 }
 
-// Run runs script with "sh -euc" in a running machine and returns its stdout.
+// Spawn starts argv, such as a daemon, in the background in a running machine and returns its guest PID.
+// env holds KEY=VALUE pairs.
+func (c CLI) Spawn(ctx context.Context, name string, argv, env []string) (int, error) {
+	args := append(append(execArgs(name, env), "-d", "--"), argv...)
+	out, err := c.output(ctx, args...)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("smolvm %s printed %q; want a PID", commandLine(args), out)
+	}
+	return pid, nil
+}
+
+func execArgs(name string, env []string) []string {
+	args := []string{"machine", "exec", "--name", name}
+	for _, e := range env {
+		args = append(args, "-e", e)
+	}
+	return args
+}
+
+// Run runs script with "sh -euo pipefail -c" in a running machine and returns its stdout.
 // Its errors start with the script's first line.
 func (c CLI) Run(ctx context.Context, name, script string) (string, error) {
 	var stdout strings.Builder
-	if err := c.Exec(ctx, name, []string{"sh", "-euc", script}, ExecOptions{Stdout: &stdout}); err != nil {
+	if err := c.Exec(ctx, name, []string{"sh", "-euo", "pipefail", "-c", script}, ExecOptions{Stdout: &stdout}); err != nil {
 		first, _, _ := strings.Cut(strings.TrimSpace(script), "\n")
 		return "", fmt.Errorf("%s: %w", first, err)
 	}

@@ -97,18 +97,14 @@ func TestCheckVersionAcceptsThePinnedVersion(t *testing.T) {
 	}
 }
 
-func TestCheckVersionRejectsAnotherVersion(t *testing.T) {
-	c, _ := fake{stdout: "smolvm 1.21.0\n"}.start(t)
+func TestCheckVersionRejectsOtherOutput(t *testing.T) {
+	for _, out := range []string{"smolvm 1.21.0\n", "smolvm 1.22.0-rc.1\n", "smolvm\n"} {
+		t.Run(out, func(t *testing.T) {
+			c, _ := fake{stdout: out}.start(t)
 
-	err := c.CheckVersion(t.Context())
-
-	wantInstallHint(t, err, "1.21.0")
-}
-
-func TestCheckVersionRejectsUnexpectedOutput(t *testing.T) {
-	c, _ := fake{stdout: "smolvm\n"}.start(t)
-
-	wantInstallHint(t, c.CheckVersion(t.Context()), `"smolvm\n"`)
+			wantInstallHint(t, c.CheckVersion(t.Context()), fmt.Sprintf("%q", out))
+		})
+	}
 }
 
 func TestCheckVersionExplainsHowToInstallAMissingSmolvm(t *testing.T) {
@@ -161,13 +157,13 @@ func TestCommandLines(t *testing.T) {
 	}, {
 		"start",
 		func(ctx context.Context, c smolvm.CLI) error { return c.Start(ctx, "m", smolvm.StartOptions{}) },
-		[]string{"machine", "start", "--name", "m"},
+		[]string{"machine", "start", "--name", "m", "--proxy", ""},
 	}, {
 		"start branchable",
 		func(ctx context.Context, c smolvm.CLI) error {
 			return c.Start(ctx, "m", smolvm.StartOptions{Branchable: true})
 		},
-		[]string{"machine", "start", "--name", "m", "--branchable"},
+		[]string{"machine", "start", "--name", "m", "--proxy", "", "--branchable"},
 	}, {
 		"stop",
 		func(ctx context.Context, c smolvm.CLI) error { return c.Stop(ctx, "m") },
@@ -211,24 +207,24 @@ func TestCommandLines(t *testing.T) {
 		},
 		[]string{"machine", "exec", "--name", "m", "--timeout", "1ms", "--stream", "--", "true"},
 	}, {
+		"exec with a negative timeout",
+		func(ctx context.Context, c smolvm.CLI) error {
+			return c.Exec(ctx, "m", []string{"true"}, smolvm.ExecOptions{Timeout: -time.Second})
+		},
+		[]string{"machine", "exec", "--name", "m", "--stream", "--", "true"},
+	}, {
 		"exec with stdin",
 		func(ctx context.Context, c smolvm.CLI) error {
 			return c.Exec(ctx, "m", []string{"cat"}, smolvm.ExecOptions{Stdin: strings.NewReader("")})
 		},
 		[]string{"machine", "exec", "--name", "m", "-i", "--", "cat"},
 	}, {
-		"exec detached",
-		func(ctx context.Context, c smolvm.CLI) error {
-			return c.Exec(ctx, "m", []string{"sleep", "9"}, smolvm.ExecOptions{Detach: true})
-		},
-		[]string{"machine", "exec", "--name", "m", "-d", "--", "sleep", "9"},
-	}, {
 		"run",
 		func(ctx context.Context, c smolvm.CLI) error {
 			_, err := c.Run(ctx, "m", "echo hi\nexit 0")
 			return err
 		},
-		[]string{"machine", "exec", "--name", "m", "--stream", "--", "sh", "-euc", "echo hi\nexit 0"},
+		[]string{"machine", "exec", "--name", "m", "--stream", "--", "sh", "-euo", "pipefail", "-c", "echo hi\nexit 0"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, call := fake{}.start(t)
@@ -373,25 +369,56 @@ func TestExecKeepsTheTailOfALongLine(t *testing.T) {
 	}
 }
 
-func TestExecErrorsHideEnvValues(t *testing.T) {
+func TestExecErrorsNameTheCommandButHideEnvValues(t *testing.T) {
 	c, _ := fake{exit: 1}.start(t)
 
-	err := c.Exec(t.Context(), "m", []string{"false"}, smolvm.ExecOptions{Env: []string{"TOKEN=secret"}})
+	err := c.Exec(t.Context(), "m", []string{"docker", "load"}, smolvm.ExecOptions{Env: []string{"TOKEN=secret"}})
 
-	if want := "smolvm machine exec --name m -e TOKEN --stream: exit 1"; err == nil || err.Error() != want {
+	if want := "smolvm machine exec --name m -e TOKEN --stream -- docker: exit 1"; err == nil || err.Error() != want {
 		t.Errorf("error = %v; want %s", err, want)
 	}
 }
 
-func TestExecRejectsDetachWithStdinOrTimeout(t *testing.T) {
-	c, _ := fake{}.start(t)
-	for _, opts := range []smolvm.ExecOptions{
-		{Detach: true, Stdin: strings.NewReader("")},
-		{Detach: true, Timeout: time.Second},
-	} {
-		if err := c.Exec(t.Context(), "m", []string{"true"}, opts); err == nil {
-			t.Errorf("Exec(%+v) returned no error", opts)
-		}
+func TestExecWithoutACommandReturnsSmolvmsError(t *testing.T) {
+	c, _ := fake{exit: 2}.start(t)
+
+	err := c.Exec(t.Context(), "m", nil, smolvm.ExecOptions{})
+
+	if want := "smolvm machine exec --name m --stream --: exit 2"; err == nil || err.Error() != want {
+		t.Errorf("error = %v; want %s", err, want)
+	}
+}
+
+func TestSpawnReturnsTheGuestPID(t *testing.T) {
+	c, call := fake{stdout: "42\n"}.start(t)
+
+	pid, err := c.Spawn(t.Context(), "m", []string{"sleep", "9"}, []string{"A=1"})
+
+	if err != nil || pid != 42 {
+		t.Errorf("Spawn() = %d, %v; want 42", pid, err)
+	}
+	if want := []string{"machine", "exec", "--name", "m", "-e", "A=1", "-d", "--", "sleep", "9"}; !reflect.DeepEqual(call().Args, want) {
+		t.Errorf("args =\n%q\nwant\n%q", call().Args, want)
+	}
+}
+
+func TestSpawnRejectsOutputWithoutAPID(t *testing.T) {
+	c, _ := fake{stdout: "started\n"}.start(t)
+
+	_, err := c.Spawn(t.Context(), "m", []string{"sleep", "9"}, nil)
+
+	if want := `smolvm machine exec --name m -d -- sleep printed "started\n"; want a PID`; err == nil || err.Error() != want {
+		t.Errorf("error = %v; want %s", err, want)
+	}
+}
+
+func TestSpawnErrorsCarrySmolvmsStderr(t *testing.T) {
+	c, _ := fake{stderr: "Error: not running\n", exit: 1}.start(t)
+
+	_, err := c.Spawn(t.Context(), "m", []string{"sleep", "9"}, nil)
+
+	if want := "smolvm machine exec --name m -d -- sleep: exit 1\nError: not running"; err == nil || err.Error() != want {
+		t.Errorf("error = %v; want %s", err, want)
 	}
 }
 
@@ -401,7 +428,7 @@ func TestCancellingInterruptsSmolvm(t *testing.T) {
 
 	err := execUntilCancelled(t, c, ctx, cancel)
 
-	if want := "smolvm machine exec --name m --stream: context canceled\nstarting\ninterrupted"; !errors.Is(err, context.Canceled) || err.Error() != want {
+	if want := "smolvm machine exec --name m --stream -- sleep: context canceled\nstarting\ninterrupted"; !errors.Is(err, context.Canceled) || err.Error() != want {
 		t.Errorf("error =\n%v\nwant context.Canceled and\n%s", err, want)
 	}
 }
@@ -413,7 +440,7 @@ func TestCancellingKillsSmolvmIfItIgnoresInterrupts(t *testing.T) {
 
 	err := execUntilCancelled(t, c, ctx, cancel)
 
-	if want := "smolvm machine exec --name m --stream: context canceled"; !errors.Is(err, context.Canceled) || err.Error() != want {
+	if want := "smolvm machine exec --name m --stream -- sleep: context canceled"; !errors.Is(err, context.Canceled) || err.Error() != want {
 		t.Errorf("error = %v; want context.Canceled and %s", err, want)
 	}
 }
@@ -460,7 +487,7 @@ func TestRunErrorsNameTheScriptsFirstLine(t *testing.T) {
 	if !errors.As(err, &exit) || exit.Code != 2 {
 		t.Fatalf("error = %v; want an ExitError with code 2", err)
 	}
-	if want := "kind create cluster: smolvm machine exec --name m --stream: exit 2\nboom"; err.Error() != want {
+	if want := "kind create cluster: smolvm machine exec --name m --stream -- sh: exit 2\nboom"; err.Error() != want {
 		t.Errorf("error =\n%s\nwant\n%s", err, want)
 	}
 }

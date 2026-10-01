@@ -103,18 +103,24 @@ func TestCheckpointContractRejectsMalformedFiles(t *testing.T) {
 		{"contract without a kind", "no checkpoint CPU contract", checkpoint(nil, []byte(`{"checkpoint": {"cpu_contract": {}}}`))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := smolvm.CheckpointContract(writeFile(t, tc.file))
+			path := writeFile(t, tc.file)
 
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("CheckpointContract() = %q, %v; want an error containing %q", got, err, tc.want)
+			got, err := smolvm.CheckpointContract(path)
+
+			if err == nil || !strings.HasPrefix(err.Error(), path+": ") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("CheckpointContract() = %q, %v; want an error naming the file and containing %q", got, err, tc.want)
 			}
 		})
 	}
 }
 
-func TestCheckpointContractFailsForAMissingFile(t *testing.T) {
-	if _, err := smolvm.CheckpointContract(filepath.Join(t.TempDir(), "none.checkpoint")); err == nil {
-		t.Error("no error")
+func TestCheckpointContractNamesAMissingFileOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "none.checkpoint")
+
+	_, err := smolvm.CheckpointContract(path)
+
+	if want := "open " + path + ": no such file or directory"; err == nil || err.Error() != want {
+		t.Errorf("error = %v; want %s", err, want)
 	}
 }
 
