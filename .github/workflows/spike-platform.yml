@@ -1,0 +1,84 @@
+name: spike-platform
+on:
+  pull_request:
+    branches: [smol]
+    paths:
+      - .github/workflows/spike-platform.yml
+      - hack/spike/platform/**
+  workflow_dispatch:
+concurrency:
+  group: spike-platform-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  SMOLVM_VERSION: 1.22.0
+  SMOLVM_IDLE_RECLAIM: "off"
+jobs:
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        restore: [plain, zeroed]
+        shmem-thp: [never, always]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./hack/spike/platform/setup
+        with:
+          shmem-thp: ${{ matrix.shmem-thp }}
+      - run: hack/spike/platform/run.sh host-tools
+      - name: Boot a bare VM and install tools
+        run: hack/spike/platform/run.sh boot
+      - name: Start dockerd and probe the kernel
+        run: hack/spike/platform/run.sh docker
+      - name: Session registry and Kind management cluster
+        run: hack/spike/platform/run.sh mgmt
+      - name: Cluster API, kapp-controller and the workload cluster
+        run: hack/spike/platform/run.sh platform
+      - name: Checkpoint the platform
+        run: hack/spike/platform/run.sh capture
+      - name: Zero free guest memory and checkpoint again
+        run: hack/spike/platform/run.sh zeroed-capture
+      - name: Restore the ${{ matrix.restore }} checkpoint
+        run: hack/spike/platform/run.sh restore ${{ matrix.restore }}
+      - name: Branch env-a with published ports and wait for the gates
+        run: hack/spike/platform/run.sh env env-a
+      - name: kubectl and the session registry through env-a
+        run: hack/spike/platform/run.sh access env-a 18181 18182
+      - name: Branch env-b and wait for the gates
+        run: hack/spike/platform/run.sh env env-b
+      - name: env-a still passes the gates
+        run: hack/spike/platform/run.sh recheck env-a "after env-b gates"
+      - name: kubectl and the session registry through env-b
+        run: hack/spike/platform/run.sh access env-b 18183 18184
+      - name: Soak both environments for 15 minutes
+        run: hack/spike/platform/run.sh soak
+      - name: Gates, churn and OOM kills after the soak
+        run: hack/spike/platform/run.sh after-soak
+      - if: always()
+        run: hack/spike/platform/run.sh summary
+      - if: failure()
+        run: hack/spike/platform/run.sh diag
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ matrix.restore }}-thp-${{ matrix.shmem-thp }}
+          path: |
+            ${{ runner.temp }}/platform/
+            !${{ runner.temp }}/platform/bin/
+            !${{ runner.temp }}/platform/*.tgz
+            !${{ runner.temp }}/platform/*.kubeconfig
+          retention-days: 7
+  branch-memory:
+    strategy:
+      fail-fast: false
+      matrix:
+        shmem-thp: [never, always]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./hack/spike/platform/setup
+        with:
+          shmem-thp: ${{ matrix.shmem-thp }}
+      - run: hack/spike/platform/branch-memory.sh
