@@ -145,11 +145,38 @@ upstream() {
   inspect UB3-ctrlc ub
 }
 
-greeting() {
-  local G=$RUNNER_TEMP/greeting t=$SECONDS
-  "$REPO/explore/lib/adopter.sh" "$REPO/examples/greeting" "$G" >/dev/null 2>&1 || echo "adopter failed"
-  (cd "$G" && GOWORK=off go build -o "$RUNNER_TEMP/greeting-devenv" ./cmd/devenv) || echo "build failed"
+# setup_greeting copies the example to $G, as its own repo that builds images from its own go.mod,
+# and builds its CLI against this checkout of the tool.
+G=$RUNNER_TEMP/greeting
+setup_greeting() {
+  local t=$SECONDS
+  cp -a "$REPO/examples/greeting" "$G"
+  (cd "$G" && git init -q && git add -A && git -c user.email=x@example.com -c user.name=x commit -qm init)
+  "$REPO/explore/lib/adopter.sh" "$REPO/examples/greeting" "$RUNNER_TEMP/greeting-build" >/dev/null 2>&1 || echo "adopter failed"
+  (cd "$RUNNER_TEMP/greeting-build" && GOWORK=off go build -o "$RUNNER_TEMP/greeting-devenv" ./cmd/devenv) || echo "build failed"
   obs "greeting setup took $((SECONDS - t))s"
+}
+
+flake() {
+  for i in 1 2 3 4 5 6 7; do
+    [ "$(left)" -gt 540 ] || break
+    run_case F$i 900 DIAG_SCENARIO=good -- test --name fl
+  done
+  obs "flake: $(grep -l 'passed\.' "$RUNNER_TEMP"/out-F*.log | wc -l) of $(ls "$RUNNER_TEMP"/out-F*.log | wc -l) passed"
+  grep -h -B2 '^Error' "$RUNNER_TEMP"/out-F*.log
+}
+
+greetingok() {
+  setup_greeting
+  for i in 1 2 3; do
+    [ "$(left)" -gt 720 ] || break
+    RUN_DIR=$G RUN_BIN=$RUNNER_TEMP/greeting-devenv run_case GOK$i 1200 -- test --name gok
+  done
+  obs "greeting: $(grep -l 'passed\.' "$RUNNER_TEMP"/out-GOK*.log | wc -l) of $(ls "$RUNNER_TEMP"/out-GOK*.log | wc -l) passed"
+}
+
+greeting() {
+  setup_greeting
   local yaml=$G/config/greeting-controller/greeting-controller.yaml
   cp "$yaml" "$RUNNER_TEMP/gc.yaml"
   sed -i 's|^        image: greeting-controller$|        image: greeting-controller\n        args: ["--metrics-bind-address=:8443"]|' "$yaml"
