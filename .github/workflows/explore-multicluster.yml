@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [mass-delete, hook-consumer, generated-cluster]
+        script: [massdelete-hook, capacity-repro, upgrade-redeploy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

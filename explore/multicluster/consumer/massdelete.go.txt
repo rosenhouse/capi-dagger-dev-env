@@ -1,0 +1,107 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
+)
+
+// massDelete adds six clusters, deletes them at once, and watches both host kubeconfigs.
+// It fails if the management API stops answering from the host, so devenv test exports logs.
+func massDelete(ctx context.Context, e *devenv.Environment) error {
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	clusters := dyn.Resource(kube.ClusterGVR).Namespace(devenv.WorkloadNamespace)
+	work, err := clusters.Get(ctx, devenv.WorkloadCluster, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	copyOf := func(name string) *unstructured.Unstructured {
+		spec, _, _ := unstructured.NestedMap(work.Object, "spec")
+		delete(spec, "controlPlaneEndpoint")
+		delete(spec, "infrastructureRef")
+		delete(spec, "controlPlaneRef")
+		c := &unstructured.Unstructured{Object: map[string]any{"apiVersion": work.GetAPIVersion(), "kind": "Cluster", "spec": spec}}
+		c.SetName(name)
+		c.SetNamespace(devenv.WorkloadNamespace)
+		c.SetLabels(map[string]string{"cni": "kindnet"})
+		return c
+	}
+	var names []string
+	for batch := range 2 {
+		start := time.Now()
+		var mine []string
+		for i := range 3 {
+			name := fmt.Sprintf("extra%d", batch*3+i+1)
+			if _, err := clusters.Create(ctx, copyOf(name), metav1.CreateOptions{}); err != nil {
+				return err
+			}
+			mine = append(mine, name)
+		}
+		for _, name := range mine {
+			if err := ready.Wait(ctx, ready.Gate{Name: name + " Available", Timeout: 12 * time.Minute, Interval: 5 * time.Second,
+				Check: func(ctx context.Context) error { return kube.ClusterAvailable(ctx, dyn, devenv.WorkloadNamespace, name) }}); err != nil {
+				return err
+			}
+		}
+		names = append(names, mine...)
+		fmt.Printf("OBS: hook: %v Available after %s\n", mine, time.Since(start).Round(time.Second))
+	}
+
+	probeCtx, stopProbes := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	failures := map[string][]string{}
+	for _, kc := range []struct{ name, path string }{{"mgmt", e.MgmtKubeconfig}, {"workload", e.WorkloadKubeconfig}} {
+		cs, err := kube.Client(kc.path)
+		if err != nil {
+			stopProbes()
+			return err
+		}
+		wg.Go(func() {
+			for probeCtx.Err() == nil {
+				attempt, cancel := context.WithTimeout(probeCtx, 5*time.Second)
+				_, err := cs.Discovery().RESTClient().Get().AbsPath("/readyz").DoRaw(attempt)
+				cancel()
+				if err != nil && probeCtx.Err() == nil {
+					mu.Lock()
+					failures[kc.name] = append(failures[kc.name], time.Now().Format("15:04:05")+" "+err.Error())
+					mu.Unlock()
+				}
+				time.Sleep(3 * time.Second)
+			}
+		})
+	}
+	start := time.Now()
+	for _, name := range names {
+		if err := clusters.Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+			fmt.Printf("OBS: hook: delete %s: %v\n", name, err)
+		}
+	}
+	fmt.Printf("OBS: hook: deleted %d clusters at %s\n", len(names), start.Format("15:04:05"))
+	time.Sleep(6 * time.Minute)
+	stopProbes()
+	wg.Wait()
+	var errs []error
+	for _, name := range []string{"mgmt", "workload"} {
+		f := failures[name]
+		fmt.Printf("OBS: hook: %s readyz failures from host in 6m after deleting: %d\n", name, len(f))
+		if len(f) > 0 {
+			fmt.Printf("  first: %s\n  last:  %s\n", f[0], f[len(f)-1])
+			errs = append(errs, fmt.Errorf("%s API failed %d probes from the host: %s", name, len(f), strings.SplitN(f[len(f)-1], " ", 2)[1]))
+		}
+	}
+	return errors.Join(errs...)
+}
