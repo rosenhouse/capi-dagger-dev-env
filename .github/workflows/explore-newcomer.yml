@@ -1,0 +1,20 @@
+name: explore-newcomer
+on:
+  push:
+    branches: [claude/dagger-exploratory-testing-pjzg3f]
+    paths: ['explore/newcomer/**', '.github/workflows/explore-newcomer.yml']
+jobs:
+  newcomer:
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [walkthrough, restart, prereq]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - run: bash explore/newcomer/${{ matrix.script }}.sh
