@@ -9,9 +9,9 @@ jobs:
       fail-fast: false
       matrix:
         script:
-          - proxy.sh localhost,127.0.0.1,docker,.dagger.local
-          - offline.sh
-          - gitlab-dind.sh
+          - fail-logs.sh
+          - outage.sh
+          - goproxy.sh
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

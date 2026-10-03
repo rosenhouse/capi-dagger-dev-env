@@ -11,7 +11,7 @@ obs "host: GOPROXY=$GOPROXY; host go build of the example: $(GOFLAGS=-modcacherw
 
 engine_with() { # extra docker run args
   docker rm -f dagger-engine-gp >/dev/null 2>&1
-  docker run -d --name dagger-engine-gp --privileged -e HTTPS_PROXY=$PX -e https_proxy=$PX "$@" \
+  docker run -d --name dagger-engine-gp --privileged -e HTTPS_PROXY=$PX -e https_proxy=$PX -e NO_PROXY=localhost,127.0.0.1,docker,.dagger.local "$@" \
     -v dagger-gp:/var/lib/dagger registry.dagger.io/engine:v0.21.10 >/dev/null
 }
 export _EXPERIMENTAL_DAGGER_RUNNER_HOST=docker-container://dagger-engine-gp
