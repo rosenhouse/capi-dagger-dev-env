@@ -9,10 +9,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - script: version.sh
+          - script: followup.sh
             dir: examples/greeting
-          - script: orphans.sh
-            dir: .
+          - script: fill.sh
+            dir: examples/greeting
+          - script: freeze.sh
+            dir: examples/greeting
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
