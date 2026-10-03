@@ -26,7 +26,8 @@ obs "kapp-controller: $(mk -n kapp-controller get deploy kapp-controller -o json
 mk get apps -A
 echo "--- kctrl package available list -A"; kc package available list -A 2>&1 | tail -12
 echo "--- kctrl package installed list -A"; kc package installed list -A 2>&1 | tail -12
-echo "--- kctrl package available get --values-schema"; kc package available get -p addon-manager.acme.example.com -n default --values-schema 2>&1 | tail -12
+echo "--- kctrl package available get --values-schema"; kc package available get -p addon-manager.acme.example.com/0.1.0 -n default --values-schema 2>&1 | tail -12
+echo "--- kctrl package available get"; kc package available get -p addon-manager.acme.example.com -n default 2>&1 | tail -12
 echo "--- kctrl package installed get"; kc package installed get -i addon-manager -n devenv 2>&1 | tail -15
 
 section "namespace-less resources, overlay and README.md in config"
@@ -64,11 +65,18 @@ mk get packages.data.packaging.carvel.dev -A -o custom-columns=NAME:.metadata.na
 obs "Package versions after --version 1.2.0: $(mk get packages.data.packaging.carvel.dev -A -o jsonpath='{.items[*].spec.version}')"
 obs "addon-manager log: $(mk -n acme-system logs deploy/addon-manager 2>&1 | head -1)"
 
+section "drift: a Package deleted by hand, then redeploy with the same source and version"
+mk -n kapp-controller-packaging-global delete packages.data.packaging.carvel.dev addon-manager.acme.example.com.0.1.0
+rd drift --version 1.2.0
+obs "Package after redeploy[drift]: $(mk -n kapp-controller-packaging-global get packages.data.packaging.carvel.dev addon-manager.acme.example.com.0.1.0 --no-headers 2>&1)"
+obs "pkgi addon-manager after redeploy[drift]: $(mk -n devenv get pkgi addon-manager -o jsonpath='{.status.friendlyDescription}')"
+
 section "addon-manager pins the agent to its own version (constraint: self) while the agent changes"
 sed -i 's/constraint: ">=0.0.0"/constraint: "self"/' "$SCHEMA"
 sed -i 's/agent v2 version=/agent v3 version=/' "$A/cmd/agent/main.go"
 rd self --version 1.2.0
 obs "after redeploy[self], remote pkgi: $(remote_pkgi)"
+obs "after redeploy[self], App default/work-agent: $(mk -n default get app work-agent -o jsonpath='{.status.friendlyDescription}' 2>&1)"
 obs "after redeploy[self], agent log: $(wk -n acme-agent logs deploy/agent 2>&1 | tail -1)"
 
 section teardown

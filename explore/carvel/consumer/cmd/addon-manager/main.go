@@ -62,7 +62,7 @@ func reconcile(ctx context.Context, dyn dynamic.Interface, refName, constraint s
 			"metadata": map[string]any{"name": name + "-agent", "namespace": ns},
 			"spec": map[string]any{
 				"cluster": map[string]any{
-					"namespace":           "acme-agent",
+					"namespace":           "default",
 					"kubeconfigSecretRef": map[string]any{"name": name + "-kubeconfig", "key": "value"},
 				},
 				"packageRef": map[string]any{"refName": refName, "versionSelection": map[string]any{"constraints": constraint}},

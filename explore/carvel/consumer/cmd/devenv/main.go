@@ -31,6 +31,16 @@ func main() {
 			devenv.Package{Name: "legacy", RefName: "legacy.acme.example.com", Config: "packages/legacy/bundle", Images: []string{"agent"}},
 			devenv.Package{Name: "plain-values", RefName: "plain-values.acme.example.com", Config: "packages/plain-values/config"},
 		)
+	case "workaround":
+		cfg.Packages = append(cfg.Packages,
+			devenv.Package{Name: "dns-config", RefName: "dns-config.acme.example.com", Config: "packages/dns-config/config"})
+	case "locks":
+		// A bundle root with only an images lock, a committed kbld lock, and a Helm chart.
+		cfg.Packages = append(cfg.Packages,
+			devenv.Package{Name: "legacy-lock", RefName: "legacy-lock.acme.example.com", Config: "packages/legacy-lock/bundle", Images: []string{"agent"}},
+			devenv.Package{Name: "kbld-locked", RefName: "kbld-locked.acme.example.com", Config: "packages/kbld-locked/config", Images: []string{"agent"}},
+			devenv.Package{Name: "helm-chart", RefName: "helm-chart.acme.example.com", Config: "packages/helm-chart/chart", Images: []string{"agent"}},
+		)
 	case "badref":
 		cfg.Packages[0].RefName = "addon-manager"
 	case "badname":

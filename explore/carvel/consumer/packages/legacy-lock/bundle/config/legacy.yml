@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: acme-legacy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy
+  namespace: acme-legacy
+spec:
+  selector:
+    matchLabels: {app: legacy}
+  template:
+    metadata:
+      labels: {app: legacy}
+    spec:
+      containers:
+      - name: legacy
+        image: agent

@@ -9,7 +9,7 @@ SCHEMA=$A/packages/addon-manager/bundle/config/schema.yml
 section setup
 setup_consumer
 sed -i 's|^image: addon-manager|image: ghcr.io/acme/addon-manager:v1.4.0|; s/constraint: ">=1.0.0"/constraint: ">=0.0.0"/' "$SCHEMA"
-(cd "$A" && git commit -qam "dev: relax constraint")
+(cd "$A" && git -c user.email=x@example.com -c user.name=x commit -qam "dev: relax constraint")
 cat "$SCHEMA"
 
 section "up with production image refs and a tag-referenced third-party package"

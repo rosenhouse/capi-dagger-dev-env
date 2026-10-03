@@ -1,0 +1,2 @@
+image: agent
+replicas: 1

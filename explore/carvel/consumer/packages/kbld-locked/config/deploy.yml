@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: acme-kbld
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kbld-locked
+  namespace: acme-kbld
+spec:
+  selector:
+    matchLabels: {app: kbld-locked}
+  template:
+    metadata:
+      labels: {app: kbld-locked}
+    spec:
+      containers:
+      - name: kbld-locked
+        image: agent

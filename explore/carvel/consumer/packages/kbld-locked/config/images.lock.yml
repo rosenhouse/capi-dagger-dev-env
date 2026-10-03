@@ -1,0 +1,8 @@
+#! Written by: kbld -f config --lock-output config/images.lock.yml
+apiVersion: kbld.k14s.io/v1alpha1
+kind: Config
+minimumRequiredVersion: 0.31.0
+overrides:
+- image: agent
+  newImage: ghcr.io/acme/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333
+  preresolved: true
