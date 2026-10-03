@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [iterate, failures, hostdebug]
+        script: [hostdebug, revisit, soak]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

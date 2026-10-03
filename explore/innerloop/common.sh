@@ -107,6 +107,11 @@ dump_state() {
   ls -la "$G/.devenv/$NAME" 2>&1
   tail -40 "$G/.devenv/$NAME/dagger.log" 2>&1
   mk get apps,pkgi -A 2>&1 | head -20
+  local logs=$G/.devenv/$NAME/logs
+  find "$logs" -maxdepth 3 2>/dev/null | head -30
+  find "$logs" -path '*capi-kubeadm-bootstrap*' -name '*.log' 2>/dev/null | head -2 | while read -r f; do echo "--- $f"; tail -25 "$f"; done
+  grep -r -h -i -E 'failed to pull|ErrImagePull|ImagePullBackOff|Readiness probe failed|OOMKilled' "$logs" 2>/dev/null | tail -20 | cut -c1-300
+  find "$logs" -name 'kubelet.log' 2>/dev/null | head -1 | xargs -r tail -15 | cut -c1-300
 }
 
 summary() {
