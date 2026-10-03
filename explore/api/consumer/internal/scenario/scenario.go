@@ -89,6 +89,26 @@ func Config(name string) devenv.Config {
 		cfg.Packages = append(cfg.Packages, devenv.Package{Name: "extra", RefName: "extra.legacyctl.example.com", Config: "config/extras", Images: []string{"extra"}})
 	case "sibling":
 		cfg.Commands = append(cfg.Commands, "./cmd/usesapi")
+	case "test-fail":
+		cfg.Test = func(context.Context, *devenv.Environment) error { return errors.New("test-fail") }
+	case "name-upper":
+		cfg.Packages = []devenv.Package{{Name: "Manager", RefName: manager.RefName, Config: manager.Config, Images: manager.Images}}
+	case "refname-short":
+		cfg.Packages = []devenv.Package{{Name: "manager", RefName: "manager", Config: manager.Config, Images: manager.Images}}
+	case "dup-refname":
+		cfg.Packages = []devenv.Package{manager, {Name: "extras", RefName: manager.RefName, Config: "config/extras"}}
+	case "bad-config":
+		cfg.Packages = []devenv.Package{manager, {Name: "broken", RefName: "broken.legacyctl.example.com", Config: "config/broken"}}
+	case "root-cmd":
+		cfg.Commands = []string{"./"}
+		cfg.Packages = []devenv.Package{{Name: "manager", RefName: manager.RefName, Config: manager.Config, Images: []string{"."}}}
+	case "non-main":
+		cfg.Commands = append(cfg.Commands, "./internal/scenario")
+	case "hook-dockerfile-missing":
+		cfg.Images = func(c *dagger.Client, src *dagger.Directory, version string) map[string]*dagger.Container {
+			return map[string]*dagger.Container{"sidecar": src.DockerBuild(dagger.DirectoryDockerBuildOpts{Dockerfile: "build/sidecar/Dockerfile"})}
+		}
+		cfg.Packages = []devenv.Package{manager, {Name: "sidecar", RefName: "sidecar.legacyctl.example.com", Config: "config/extras", Images: []string{"sidecar"}}}
 	case "image-missing":
 		cfg.Packages = []devenv.Package{{Name: "manager", RefName: "manager.legacyctl.example.com", Config: "config/manager", Images: []string{"manager", "nope"}}}
 	default:

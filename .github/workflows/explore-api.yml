@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [run-gotest.sh, run-cli-hooks.sh, run-edge.sh]
+        script: [run-late.sh, run-embed.sh]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
