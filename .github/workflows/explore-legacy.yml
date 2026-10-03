@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [same, step0, iterate]
+        job: [identical, different, crash]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -22,4 +22,4 @@ jobs:
           echo "OBS: $(go version); $(kubectl version --client 2>&1 | head -1); $(kind version 2>&1); $(docker version -f '{{.Server.Version}}' 2>&1)"
       - name: ${{ matrix.job }}
         timeout-minutes: 38
-        run: bash explore/legacy/job-${{ matrix.job }}.sh
+        run: bash explore/legacy/recover.sh ${{ matrix.job }}
