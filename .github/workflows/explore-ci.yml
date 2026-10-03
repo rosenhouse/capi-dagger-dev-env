@@ -9,9 +9,7 @@ jobs:
       fail-fast: false
       matrix:
         script:
-          - fail-logs.sh
-          - outage.sh
-          - goproxy.sh
+          - nonmirrored.sh
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
