@@ -41,6 +41,9 @@ func main() {
 			devenv.Package{Name: "kbld-locked", RefName: "kbld-locked.acme.example.com", Config: "packages/kbld-locked/config", Images: []string{"agent"}},
 			devenv.Package{Name: "helm-chart", RefName: "helm-chart.acme.example.com", Config: "packages/helm-chart/chart", Images: []string{"agent"}},
 		)
+	case "collide":
+		cfg.Packages = append(cfg.Packages,
+			devenv.Package{Name: "metrics", RefName: "metrics.acme.example.com", Config: "packages/metrics/config"})
 	case "badref":
 		cfg.Packages[0].RefName = "addon-manager"
 	case "badname":

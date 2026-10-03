@@ -1,0 +1,7 @@
+#! No namespace: production installs this package with intoNs: acme-metrics.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acme-defaults
+data:
+  logLevel: debug
