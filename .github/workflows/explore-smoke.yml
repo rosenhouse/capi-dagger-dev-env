@@ -1,0 +1,12 @@
+name: explore-smoke
+on:
+  push:
+    branches: [claude/dagger-exploratory-testing-pjzg3f]
+    paths: ['explore/smoke/**', '.github/workflows/explore-smoke.yml']
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: explore/smoke/run.sh
