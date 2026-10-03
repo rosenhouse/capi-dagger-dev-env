@@ -1,0 +1,32 @@
+name: explore-lifecycle
+on:
+  push:
+    branches: [claude/dagger-exploratory-testing-pjzg3f]
+    paths: ['explore/lifecycle/**', '.github/workflows/explore-lifecycle.yml']
+jobs:
+  lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - script: signals.sh
+            dir: examples/greeting
+          - script: multi.sh
+            dir: examples/greeting
+          - script: disk.sh
+            dir: .
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - run: go build -o /tmp/devenv ./cmd/devenv
+        working-directory: examples/greeting
+      - run: bash "$GITHUB_WORKSPACE/explore/lifecycle/${{ matrix.script }}"
+        working-directory: ${{ matrix.dir }}
+        timeout-minutes: 42
+      - if: always()
+        run: for f in "$RUNNER_TEMP"/logs/*.log; do echo "--- $f"; tail -8 "$f"; done
