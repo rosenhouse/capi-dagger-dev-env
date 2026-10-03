@@ -1,0 +1,9 @@
+apiVersion: fleet.acme.io/v1alpha1
+kind: FleetPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: fleet-addons
+    app.kubernetes.io/managed-by: kustomize
+  name: default
+spec:
+  message: hello from the fleet

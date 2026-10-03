@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devenv-placeholder
+  namespace: default
+data:
+  why: devenv requires at least one package

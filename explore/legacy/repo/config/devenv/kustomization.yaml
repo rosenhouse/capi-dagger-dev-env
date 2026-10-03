@@ -1,0 +1,16 @@
+# Renders config/default for hack/devenv, which names images after their command directories.
+resources:
+- ../default
+patches:
+- target:
+    kind: Deployment
+    labelSelector: control-plane=controller-manager
+  patch: |-
+    - op: remove
+      path: /spec/template/spec/containers/0/command
+    - op: replace
+      path: /spec/template/spec/containers/0/image
+      value: cmd
+    - op: replace
+      path: /spec/template/spec/containers/0/env/0/value
+      value: agent
