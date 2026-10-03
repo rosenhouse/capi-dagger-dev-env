@@ -53,8 +53,13 @@ func main() {
 		{"relative replace outside Root", relativeReplace},
 		{"cgo command", cgoCommand},
 		{"sequential pushes", sequentialPushes},
+		{"setuptools-scm", setuptoolsScm},
 	}
+	only := os.Getenv("PROBE_ONLY")
 	for _, tc := range cases {
+		if only != "" && !strings.Contains(only, tc.name) {
+			continue
+		}
 		fmt.Printf("\n===== %s\n", tc.name)
 		start := time.Now()
 		tc.run()
@@ -326,4 +331,30 @@ func sequentialPushes() {
 	}
 	wg.Wait()
 	obs("three 20s image builds: pushed in sequence %.1fs, pushed concurrently %.1fs", seq.Seconds(), time.Since(start).Seconds())
+}
+
+// setuptoolsScm builds a Python package whose version comes from Git, as setuptools-scm and hatch-vcs do.
+func setuptoolsScm() {
+	dir := repo("t-scm", map[string]string{
+		"pyproject.toml":      "[build-system]\nrequires = [\"setuptools>=64\", \"setuptools-scm>=8\"]\nbuild-backend = \"setuptools.build_meta\"\n\n[project]\nname = \"greeter\"\ndynamic = [\"version\"]\n\n[tool.setuptools_scm]\n",
+		"greeter/__init__.py": "",
+		"Dockerfile":          "FROM python:3.12-slim\nRUN apt-get update -qq && apt-get install -y -qq git >/dev/null\nWORKDIR /src\nCOPY . .\nRUN pip install --no-cache-dir -q . && pip show greeter | grep Version\n",
+	})
+	sh(dir, "git tag v1.2.3")
+	_, err := push(build.Source(c, dir).DockerBuild(), "greeter")
+	obs("setuptools-scm package built from the source snapshot: err=%v", err != nil)
+	if err != nil {
+		fmt.Println(userError(err))
+	}
+	out, err := c.Host().Directory(dir).DockerBuild().WithExec([]string{"pip", "show", "greeter"}).Stdout(ctx)
+	obs("same package built from the host directory with .git: err=%v version line=%q", err, grepLine(out, "Version"))
+}
+
+func grepLine(s, prefix string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.HasPrefix(l, prefix) {
+			return l
+		}
+	}
+	return ""
 }

@@ -4,7 +4,7 @@ on:
     branches: [claude/dagger-exploratory-testing-pjzg3f]
     paths: ['explore/nongo/**', '.github/workflows/explore-nongo.yml']
 jobs:
-  poly-up:
+  poly-more:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -13,9 +13,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
-      - run: bash explore/nongo/poly-up.sh
-  nested:
-    runs-on: ubuntu-24.04
+      - run: bash explore/nongo/poly-more.sh
+  poly-arm:
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
@@ -23,7 +23,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
-      - run: bash explore/nongo/nested.sh
+      - run: bash explore/nongo/poly-arm.sh
   probe:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -34,3 +34,5 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
       - run: bash explore/nongo/probe.sh
+        env:
+          PROBE_ONLY: setuptools-scm
