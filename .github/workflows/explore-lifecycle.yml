@@ -9,11 +9,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - script: signals.sh
+          - script: version.sh
             dir: examples/greeting
-          - script: multi.sh
-            dir: examples/greeting
-          - script: disk.sh
+          - script: orphans.sh
             dir: .
     runs-on: ubuntu-24.04
     timeout-minutes: 45
