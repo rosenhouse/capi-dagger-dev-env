@@ -1,0 +1,14 @@
+# Like config/devenv, but keeps kubebuilder's command: /manager.
+resources:
+- ../default
+patches:
+- target:
+    kind: Deployment
+    labelSelector: control-plane=controller-manager
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/image
+      value: cmd
+    - op: replace
+      path: /spec/template/spec/containers/0/env/0/value
+      value: agent

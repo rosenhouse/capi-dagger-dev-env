@@ -47,6 +47,11 @@ var scenarios = map[string]devenv.Config{
 		Images:   probeSource,
 		Test:     ginkgo,
 	},
+	// Like rendered, but the Deployment keeps kubebuilder's command: /manager.
+	"keepcmd": {
+		Commands: []string{"./cmd", "./cmd/agent"},
+		Packages: []devenv.Package{{Name: "fleet-addons", RefName: "fleet-addons.acme.io", Config: "deploy/keepcmd", Images: []string{"cmd", "agent"}}},
+	},
 	// kustomize output as make deploy renders it, with the team's Dockerfile building controller:latest.
 	"dockerfile": {
 		Packages: []devenv.Package{{Name: "fleet-addons", RefName: "fleet-addons.acme.io", Config: "deploy/legacy", Images: []string{"controller:latest", "agent:latest"}}},

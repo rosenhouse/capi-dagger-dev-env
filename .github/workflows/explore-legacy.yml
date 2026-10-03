@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [naive, adopted, builds]
+        job: [same, step0, iterate]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -21,4 +21,5 @@ jobs:
         run: |
           echo "OBS: $(go version); $(kubectl version --client 2>&1 | head -1); $(kind version 2>&1); $(docker version -f '{{.Server.Version}}' 2>&1)"
       - name: ${{ matrix.job }}
+        timeout-minutes: 38
         run: bash explore/legacy/job-${{ matrix.job }}.sh

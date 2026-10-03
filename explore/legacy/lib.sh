@@ -8,6 +8,7 @@ SUMMARY=()
 obs() { echo "OBS: $*"; SUMMARY+=("$*"); }
 
 summary() {
+  kill "$HEARTBEAT" 2>/dev/null
   echo "==================== SUMMARY ===================="
   for s in "${SUMMARY[@]}"; do echo "- $s"; done
 }
@@ -43,24 +44,43 @@ render() {
 }
 
 # expect_fail LOG TIMEOUT -- CMD runs an up that should fail and reports how and when.
+# It stops an up that comes up or outlives TIMEOUT.
 expect_fail() {
   local log=$1 timeout=$2; shift 3
   local start=$SECONDS
-  if pid=$("$TOOL/explore/lib/up-bg.sh" "$log" "$timeout" -- "$@" 2>/dev/null); then
-    obs "UNEXPECTED: $* came up after $((SECONDS - start))s"
-    stop_up "$pid"
-    return 0
-  fi
+  "$@" >"$log" 2>&1 &
+  local pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if grep -q " is up\." "$log"; then
+      obs "UNEXPECTED: $* came up after $((SECONDS - start))s"
+      stop_up "$pid"; return 0
+    fi
+    if [ $((SECONDS - start)) -gt "$timeout" ]; then
+      obs "TIMEOUT: $* still running after ${timeout}s; last line: $(tail -1 "$log")"
+      stop_up "$pid"; tail -25 "$log"; return 1
+    fi
+    sleep 5
+  done
   echo "---- tail of $log"; tail -25 "$log"
   obs "failed after $((SECONDS - start))s: $(grep -m1 -E '^Error:' "$log" | cut -c1-300)"
   return 1
 }
 
+# heartbeat prints memory and the newest progress line every minute, so a hung job shows where it is.
+heartbeat() {
+  while sleep 60; do
+    echo "HEARTBEAT $(date +%T) mem_used=$(free -m | awk '/Mem/{print $3}')MB $(ls -t "$RUNNER_TEMP"/*.log 2>/dev/null | head -1 | xargs -r tail -1 | cut -c1-160)"
+  done
+}
+heartbeat &
+HEARTBEAT=$!
+
 # stop_up PID interrupts an up process, as Ctrl-C does, and waits for it to exit.
 stop_up() {
   local start=$SECONDS
   kill -INT "$1" 2>/dev/null
-  while kill -0 "$1" 2>/dev/null && [ $((SECONDS - start)) -lt 300 ]; do sleep 2; done
+  while kill -0 "$1" 2>/dev/null && [ $((SECONDS - start)) -lt 180 ]; do sleep 2; done
+  kill -9 "$1" 2>/dev/null
   echo "up $1 stopped after $((SECONDS - start))s"
 }
 
