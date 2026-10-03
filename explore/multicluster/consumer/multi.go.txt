@@ -1,0 +1,81 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
+)
+
+// multi is a Test hook for a controller that must handle a second cluster and a recreated one.
+// It fails on purpose at the end, so devenv test exports logs.
+func multi(ctx context.Context, e *devenv.Environment) error {
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	clusters := dyn.Resource(kube.ClusterGVR).Namespace(devenv.WorkloadNamespace)
+	work, err := clusters.Get(ctx, devenv.WorkloadCluster, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	copyOf := func(name string) *unstructured.Unstructured {
+		spec, _, _ := unstructured.NestedMap(work.Object, "spec")
+		delete(spec, "controlPlaneEndpoint")
+		delete(spec, "infrastructureRef")
+		delete(spec, "controlPlaneRef")
+		c := &unstructured.Unstructured{Object: map[string]any{"apiVersion": work.GetAPIVersion(), "kind": "Cluster", "spec": spec}}
+		c.SetName(name)
+		c.SetNamespace(devenv.WorkloadNamespace)
+		c.SetLabels(map[string]string{"cni": "kindnet"})
+		return c
+	}
+	available := func(name string) error {
+		return ready.Wait(ctx, ready.Gate{Name: name + " Available", Timeout: 12 * time.Minute, Interval: 5 * time.Second,
+			Check: func(ctx context.Context) error { return kube.ClusterAvailable(ctx, dyn, devenv.WorkloadNamespace, name) }})
+	}
+	start := time.Now()
+	if _, err := clusters.Create(ctx, copyOf("work2"), metav1.CreateOptions{}); err != nil {
+		return err
+	}
+	if err := available("work2"); err != nil {
+		return err
+	}
+	fmt.Printf("OBS: hook: work2 Available after %s\n", time.Since(start).Round(time.Second))
+
+	start = time.Now()
+	if err := clusters.Delete(ctx, devenv.WorkloadCluster, metav1.DeleteOptions{}); err != nil {
+		return err
+	}
+	if err := ready.Wait(ctx, ready.Gate{Name: "work deleted", Timeout: 10 * time.Minute, Interval: 5 * time.Second,
+		Check: func(ctx context.Context) error {
+			_, err := clusters.Get(ctx, devenv.WorkloadCluster, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return errors.New("still there")
+		}}); err != nil {
+		return err
+	}
+	if _, err := clusters.Create(ctx, copyOf(devenv.WorkloadCluster), metav1.CreateOptions{}); err != nil {
+		return err
+	}
+	if err := available(devenv.WorkloadCluster); err != nil {
+		return err
+	}
+	fmt.Printf("OBS: hook: work recreated and Available after %s\n", time.Since(start).Round(time.Second))
+	verifyErr := e.Verify(ctx)
+	fmt.Printf("OBS: hook: e.Verify after recreating work: %v\n", verifyErr)
+	redeployErr := e.Redeploy(ctx, "hook-v2", io.Discard)
+	fmt.Printf("OBS: hook: e.Redeploy with work2 and recreated work: %v\n", redeployErr)
+	return fmt.Errorf("intentional failure so devenv test exports logs (Verify: %v)", verifyErr)
+}
