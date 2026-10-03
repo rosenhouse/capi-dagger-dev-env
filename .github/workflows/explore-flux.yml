@@ -1,0 +1,23 @@
+name: explore-flux
+on:
+  push:
+    branches: [claude/dagger-exploratory-testing-pjzg3f]
+    paths: ['explore/flux/**', '.github/workflows/explore-flux.yml']
+jobs:
+  flux:
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [hybrid, fluxonly, kustomize]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - run: kubectl version --client 2>&1 | head -1; helm version --short; jq --version
+      - run: explore/flux/${{ matrix.script }}.sh
+        shell: bash
+        timeout-minutes: 43

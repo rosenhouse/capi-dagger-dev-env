@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devenv-refs
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: refs
+  namespace: devenv-refs
+data:
+  agentRef: agent
+  managerRef: manager
+  agentManifestsRef: agent-manifests
+  managerManifestsRef: manager-manifests
+  agentChartRef: agent-chart
+---
+apiVersion: kbld.k14s.io/v1alpha1
+kind: Config
+searchRules:
+- keyMatcher:
+    name: agentRef
+- keyMatcher:
+    name: managerRef
+- keyMatcher:
+    name: agentManifestsRef
+- keyMatcher:
+    name: managerManifestsRef
+- keyMatcher:
+    name: agentChartRef

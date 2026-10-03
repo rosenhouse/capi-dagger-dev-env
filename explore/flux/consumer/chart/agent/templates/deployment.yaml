@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-helm
+spec:
+  selector:
+    matchLabels:
+      app: agent-helm
+  template:
+    metadata:
+      labels:
+        app: agent-helm
+    spec:
+      containers:
+      - name: agent
+        image: {{ .Values.image }}
