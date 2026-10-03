@@ -1,0 +1,30 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"time"
+
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv"
+)
+
+// Replaces the example's Test with one that leaves a marker pod in each cluster and fails.
+func init() { config.Test = failing }
+
+func failing(ctx context.Context, e *devenv.Environment) error {
+	for _, c := range []struct{ kubeconfig, marker string }{
+		{e.WorkloadKubeconfig, "CRASHER-WORKLOAD-MARKER"},
+		{e.MgmtKubeconfig, "CRASHER-MGMT-MARKER"},
+	} {
+		out, err := exec.CommandContext(ctx, "kubectl", "--kubeconfig", c.kubeconfig, "run", "crasher",
+			"--image=busybox:1.37", "--restart=Never", "--", "sh", "-c", "echo "+c.marker+"; exit 3").CombinedOutput()
+		os.Stderr.Write(out)
+		if err != nil {
+			return err
+		}
+	}
+	time.Sleep(45 * time.Second)
+	return errors.New("injected test failure")
+}
