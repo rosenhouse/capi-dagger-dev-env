@@ -2,7 +2,7 @@ FROM python:3.12-slim AS base
 WORKDIR /app
 
 FROM base AS deps
-RUN echo "deps-stamp=$(date +%s%N) uname=$(uname -m)" > /deps-stamp
+RUN echo "computed-$((6*7))" && echo "deps-stamp=$(date +%s%N) uname=$(uname -m)" > /deps-stamp
 
 FROM base AS app
 ARG TARGETARCH
