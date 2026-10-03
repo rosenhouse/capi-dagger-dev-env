@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [run-late.sh, run-embed.sh]
+        script: [run-legacy.sh]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
