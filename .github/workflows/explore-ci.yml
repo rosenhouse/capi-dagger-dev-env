@@ -4,21 +4,14 @@ on:
     branches: [claude/dagger-exploratory-testing-pjzg3f]
     paths: ['explore/ci/**', '.github/workflows/explore-ci.yml']
 jobs:
-  ergonomics:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
-      - run: bash explore/ci/ergonomics.sh
-  proxy:
+  scenario:
     strategy:
       fail-fast: false
       matrix:
-        mode: [both, https]
+        script:
+          - proxy.sh localhost,127.0.0.1,docker,.dagger.local
+          - offline.sh
+          - gitlab-dind.sh
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -27,4 +20,4 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
-      - run: bash explore/ci/proxy.sh ${{ matrix.mode }}
+      - run: bash explore/ci/${{ matrix.script }}
