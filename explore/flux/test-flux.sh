@@ -37,4 +37,10 @@ k -n default patch "$(kind_of ks)/agent-work" --type merge -p "{\"spec\":{\"imag
 flux --kubeconfig "$MGMT" -n default reconcile kustomization agent-work --timeout 3m >/dev/null 2>&1
 v=$(served "$WORK" http://agent.agent:8080)
 obs "Test hook: after repin agent serves $v"
-[ "$v" = from-test-hook ]
+[ "$v" = from-test-hook ] || exit 1
+# FLUXCO_FAIL leaves a failing Kustomization behind and fails the test, to see what devenv test exports.
+if [ -n "$FLUXCO_FAIL" ]; then
+  k -n default patch "$(kind_of ks)/agent-work" --type merge -p '{"spec":{"path":"./missing"}}' >/dev/null
+  obs "Test hook: broken Kustomization: $(ready ks agent-work 60s)"
+  exit 1
+fi
