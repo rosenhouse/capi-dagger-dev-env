@@ -1,0 +1,2 @@
+#! Production overrides, passed with --data-values-file in the production Package's ytt step.
+replicas: 3

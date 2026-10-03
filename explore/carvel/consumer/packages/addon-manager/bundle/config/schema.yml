@@ -1,0 +1,9 @@
+#@data/values-schema
+---
+#@schema/desc "addon-manager image"
+image: addon-manager
+namespace: acme-system
+agent:
+  refName: agent.acme.example.com
+  #@schema/desc "Version constraint for the agent package in workload clusters"
+  constraint: ">=1.0.0"

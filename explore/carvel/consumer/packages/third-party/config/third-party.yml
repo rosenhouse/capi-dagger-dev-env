@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: acme-third-party
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mirrored-tag
+  namespace: acme-third-party
+spec:
+  selector:
+    matchLabels: {app: mirrored-tag}
+  template:
+    metadata:
+      labels: {app: mirrored-tag}
+    spec:
+      containers:
+      - name: c
+        image: docker.io/library/busybox:1.37
+        command: [sleep, infinity]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unmirrored-tag
+  namespace: acme-third-party
+spec:
+  selector:
+    matchLabels: {app: unmirrored-tag}
+  template:
+    metadata:
+      labels: {app: unmirrored-tag}
+    spec:
+      containers:
+      - name: c
+        image: public.ecr.aws/docker/library/busybox:1.37
+        command: [sleep, infinity]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: digest
+  namespace: acme-third-party
+spec:
+  selector:
+    matchLabels: {app: digest}
+  template:
+    metadata:
+      labels: {app: digest}
+    spec:
+      containers:
+      - name: c
+        image: docker.io/library/nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de

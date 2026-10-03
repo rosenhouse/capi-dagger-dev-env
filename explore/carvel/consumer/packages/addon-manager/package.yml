@@ -1,0 +1,26 @@
+apiVersion: data.packaging.carvel.dev/v1alpha1
+kind: Package
+metadata:
+  name: addon-manager.acme.example.com.1.4.0
+spec:
+  refName: addon-manager.acme.example.com
+  version: 1.4.0
+  valuesSchema:
+    openAPIv3:
+      type: object
+      properties:
+        namespace: {type: string, default: acme-system}
+  template:
+    spec:
+      fetch:
+      - imgpkgBundle:
+          image: ghcr.io/acme/addon-manager-bundle:1.4.0
+      template:
+      - ytt:
+          paths: [config/]
+      - kbld:
+          paths: ["-", .imgpkg/images.yml]
+      deploy:
+      - kapp:
+          intoNs: acme-system
+          rawOptions: ["--wait-timeout=5m", "--diff-changes=true"]

@@ -1,0 +1,61 @@
+#@ load("@ytt:data", "data")
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: #@ data.values.namespace
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: addon-manager
+  namespace: #@ data.values.namespace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: acme-addon-manager
+rules:
+- apiGroups: [cluster.x-k8s.io]
+  resources: [clusters]
+  verbs: [get, list, watch]
+- apiGroups: [packaging.carvel.dev]
+  resources: [packageinstalls]
+  verbs: [get, list, watch, create, update]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: acme-addon-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: acme-addon-manager
+subjects:
+- kind: ServiceAccount
+  name: addon-manager
+  namespace: #@ data.values.namespace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: addon-manager
+  namespace: #@ data.values.namespace
+spec:
+  selector:
+    matchLabels: {app: addon-manager}
+  template:
+    metadata:
+      labels: {app: addon-manager}
+    spec:
+      serviceAccountName: addon-manager
+      containers:
+      - name: manager
+        image: #@ data.values.image
+        env:
+        - name: AGENT_REFNAME
+          value: #@ data.values.agent.refName
+        - name: AGENT_CONSTRAINT
+          value: #@ data.values.agent.constraint

@@ -1,0 +1,8 @@
+#@ load("@ytt:data", "data")
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acme-plain
+  namespace: default
+data:
+  replicas: #@ str(data.values.replicas)

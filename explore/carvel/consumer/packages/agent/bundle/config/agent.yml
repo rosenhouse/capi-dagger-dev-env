@@ -1,0 +1,24 @@
+#@ load("@ytt:data", "data")
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: acme-agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: acme-agent
+spec:
+  selector:
+    matchLabels: {app: agent}
+  template:
+    metadata:
+      labels: {app: agent}
+    spec:
+      containers:
+      - name: agent
+        image: #@ data.values.image
+        env:
+        - name: CLUSTER_NAME
+          value: #@ data.values.clusterName

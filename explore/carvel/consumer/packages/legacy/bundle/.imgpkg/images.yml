@@ -1,0 +1,6 @@
+apiVersion: imgpkg.carvel.dev/v1alpha1
+images:
+- annotations:
+    kbld.carvel.dev/id: agent
+  image: ghcr.io/acme/agent@sha256:2222222222222222222222222222222222222222222222222222222222222222
+kind: ImagesLock

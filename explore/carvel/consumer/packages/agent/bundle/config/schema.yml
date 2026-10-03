@@ -1,0 +1,6 @@
+#@data/values-schema
+---
+image: agent
+#@schema/desc "Name of the workload cluster. The addon-manager supplies it."
+#@schema/validation min_len=1
+clusterName: ""

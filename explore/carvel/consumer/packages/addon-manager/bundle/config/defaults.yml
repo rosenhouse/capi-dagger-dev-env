@@ -1,0 +1,7 @@
+#! No namespace: production installs this package with intoNs / a PackageInstall in acme-system.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acme-defaults
+data:
+  logLevel: info

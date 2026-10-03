@@ -1,0 +1,6 @@
+apiVersion: imgpkg.carvel.dev/v1alpha1
+images:
+- annotations:
+    kbld.carvel.dev/id: addon-manager
+  image: ghcr.io/acme/addon-manager@sha256:1111111111111111111111111111111111111111111111111111111111111111
+kind: ImagesLock
