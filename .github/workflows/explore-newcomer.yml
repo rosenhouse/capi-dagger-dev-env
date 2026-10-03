@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [walkthrough, restart, prereq]
+        script: [failures, randoms, gover]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
