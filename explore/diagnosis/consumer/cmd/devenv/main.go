@@ -36,6 +36,8 @@ func main() {
 	case "manifests":
 		cfg.Packages = append(cfg.Packages, pkg("crash", "hello"), pkg("typo", "hello"), pkg("nocrd", "hello"),
 			pkg("probe", "hello"), pkg("nsmismatch", "hello"))
+	case "crashonly":
+		cfg.Packages = append(cfg.Packages, pkg("crash", "hello"))
 	case "rbac":
 		cfg.Packages = append(cfg.Packages, pkg("rbac", "lister"))
 		cfg.Test = func(ctx context.Context, e *devenv.Environment) error {

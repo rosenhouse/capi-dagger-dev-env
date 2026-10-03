@@ -99,6 +99,73 @@ platform() {
   inspect P5-sigint plat
 }
 
+wait_gone() { local pid=$1 limit=$2 s=$SECONDS; while kill -0 "$pid" 2>/dev/null && [ $((SECONDS - s)) -lt "$limit" ]; do sleep 2; done; }
+
+crashonly() {
+  local t=$SECONDS pid
+  pid=$(cd "$SRC" && DIAG_SCENARIO=crashonly "$REPO/explore/lib/up-bg.sh" "$RUNNER_TEMP/out-CO1-up.log" 1200 -- "$DIAG" up --name co)
+  obs "[CO1-up] up printed 'is up': ${pid:+yes} after $((SECONDS - t))s"
+  grep -v '^\s*$' "$RUNNER_TEMP/out-CO1-up.log" | tail -20
+  if [ -n "$pid" ]; then
+    local k=$SRC/.devenv/co/mgmt.kubeconfig
+    obs "[CO1-up] PackageInstalls: $(kubectl --kubeconfig "$k" get pkgi -n devenv --no-headers 2>&1 | tr -s ' ' | tr '\n' ';')"
+    obs "[CO1-up] crash pods: $(kubectl --kubeconfig "$k" get pods -n crash --no-headers 2>&1 | tr -s ' ' | tr '\n' ';')"
+    "$PAUSE" 60
+    obs "[CO1-up] crash pods 60s later: $(kubectl --kubeconfig "$k" get pods -n crash --no-headers 2>&1 | tr -s ' ' | tr '\n' ';')"
+    kubectl --kubeconfig "$k" get events -n crash 2>&1 | tail -6
+    (cd "$SRC" && timeout 300 "$DIAG" down --name co) 2>&1 | tail -3
+    wait_gone "$pid" 120
+  fi
+  run_case CO2-test 1200 DIAG_SCENARIO=crashonly -- test --name co
+  run_case CO3-test 1200 DIAG_SCENARIO=crashonly -- test --name co
+}
+
+upstream() {
+  run_case UB1-good 1500 DIAG_SCENARIO=good -- test --name ub
+  sudo iptables -I FORWARD 1 -p tcp --dport 443 -m string --string "quay.io" --algo bm -j REJECT --reject-with tcp-reset
+  obs "[UB2] quay.io from a container: $(docker run --rm curlimages/curl:8.11.1 -sS -m 10 -o /dev/null -w '%{http_code}' https://quay.io/v2/ 2>&1 | tail -1)"
+  run_case UB2-quay-blocked-warm 900 DIAG_SCENARIO=good -- test --name ub
+  local dl=$SRC/.devenv/ub/dagger.log
+  obs "[UB2] dagger.log lines with panic or proxy errors: $(grep -ciE 'panic|connection reset|proxyconnect' "$dl")"
+  grep -iE 'panic|connection reset|exit code' "$dl" | head -10
+  sudo iptables -D FORWARD 1
+
+  local out=$RUNNER_TEMP/out-UB3-ctrlc.log t=$SECONDS pid
+  touch "$RUNNER_TEMP/stamp-UB3-ctrlc"
+  (cd "$SRC" && DIAG_SCENARIO=manifests exec "$DIAG" up --name ub) >"$out" 2>&1 &
+  pid=$!
+  while kill -0 $pid 2>/dev/null && ! grep -q '\] management packages' "$out" && [ $((SECONDS - t)) -lt 1200 ]; do sleep 5; done
+  "$PAUSE" 60
+  local s=$SECONDS
+  kill -INT $pid
+  wait_gone $pid 300
+  wait $pid
+  obs "[UB3-ctrlc] up exit=$? $((SECONDS - s))s after Ctrl-C during the PackageInstalls gate"
+  tail -8 "$out"
+  inspect UB3-ctrlc ub
+}
+
+greeting() {
+  local G=$RUNNER_TEMP/greeting t=$SECONDS
+  "$REPO/explore/lib/adopter.sh" "$REPO/examples/greeting" "$G" >/dev/null 2>&1 || echo "adopter failed"
+  (cd "$G" && GOWORK=off go build -o "$RUNNER_TEMP/greeting-devenv" ./cmd/devenv) || echo "build failed"
+  obs "greeting setup took $((SECONDS - t))s"
+  local yaml=$G/config/greeting-controller/greeting-controller.yaml
+  cp "$yaml" "$RUNNER_TEMP/gc.yaml"
+  sed -i 's|^        image: greeting-controller$|        image: greeting-controller\n        args: ["--metrics-bind-address=:8443"]|' "$yaml"
+  grep -n -A1 'image: greeting-controller' "$yaml"
+  RUN_DIR=$G RUN_BIN=$RUNNER_TEMP/greeting-devenv run_case GC1-workload-crash 1500 -- test --name gc
+  RUN_DIR=$G inspect GC1-workload-crash gc
+  RUN_DIR=$G grep_logs GC1-workload-crash gc 'flag provided but not defined' "greeting-controller's own error"
+  cp "$RUNNER_TEMP/gc.yaml" "$yaml"
+  if [ "$(left)" -gt 840 ]; then
+    sed -i 's|^  helloImage: hello$|  helloImage: helo|' "$yaml"
+    grep -n 'helloImage' "$yaml"
+    RUN_DIR=$G RUN_BIN=$RUNNER_TEMP/greeting-devenv run_case GC2-workload-typo 1200 -- test --name gc
+    RUN_DIR=$G inspect GC2-workload-typo gc
+  fi
+}
+
 echo "OBS: runner $(uname -m) $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GB"
 setup
 "$1"

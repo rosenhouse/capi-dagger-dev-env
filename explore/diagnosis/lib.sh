@@ -23,7 +23,7 @@ run_case() {
   touch "$RUNNER_TEMP/stamp-$label"
   local out=$RUNNER_TEMP/out-$label.log t=$SECONDS
   echo "::group::$label: ${envs[*]} devenv $*"
-  (cd "$SRC" && env "${envs[@]}" timeout --signal=INT --kill-after=60 "$timeout" "$DIAG" "$@") >"$out" 2>&1
+  (cd "${RUN_DIR:-$SRC}" && env "${envs[@]}" timeout --signal=INT --kill-after=60 "$timeout" "${RUN_BIN:-$DIAG}" "$@") >"$out" 2>&1
   local code=$?
   echo "::endgroup::"
   obs "[$label] exit=$code after $((SECONDS - t))s (${envs[*]} $*)"
@@ -35,7 +35,7 @@ run_case() {
 
 # inspect LABEL ENV prints what the environment's state dir holds after a run.
 inspect() {
-  local label=$1 d=$SRC/.devenv/$2
+  local label=$1 d=${RUN_DIR:-$SRC}/.devenv/$2
   if [ ! -d "$d" ]; then obs "[$label] no state dir $d"; return; fi
   obs "[$label] state dir holds: $(ls -A "$d" | tr '\n' ' ')"
   [ -f "$d/dagger.log" ] && obs "[$label] dagger.log lines=$(wc -l <"$d/dagger.log") bytes=$(wc -c <"$d/dagger.log")"
@@ -60,7 +60,7 @@ inspect() {
 
 # grep_logs LABEL ENV PATTERN DESCRIPTION says which exported files match.
 grep_logs() {
-  local label=$1 d=$SRC/.devenv/$2/logs pattern=$3 what=$4
+  local label=$1 d=${RUN_DIR:-$SRC}/.devenv/$2/logs pattern=$3 what=$4
   local files
   files=$(grep -rlE "$pattern" "$d" 2>/dev/null | sed "s|$d/||" | head -5 | tr '\n' ' ')
   obs "[$label] $what: ${files:-NOT FOUND in logs}"
