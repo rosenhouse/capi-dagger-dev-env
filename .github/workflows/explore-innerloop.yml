@@ -1,0 +1,23 @@
+name: explore-innerloop
+on:
+  push:
+    branches: [claude/dagger-exploratory-testing-pjzg3f]
+    paths: ['explore/innerloop/**', '.github/workflows/explore-innerloop.yml']
+jobs:
+  innerloop:
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [iterate, failures, hostdebug]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      - run: kubectl version --client 2>&1 | head -1
+      - run: explore/innerloop/${{ matrix.script }}.sh
+        shell: bash
+        timeout-minutes: 43
