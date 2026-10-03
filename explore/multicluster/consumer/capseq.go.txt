@@ -1,0 +1,98 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/kube"
+	"github.com/rosenhouse/capi-dagger-dev-env/devenv/ready"
+)
+
+// capacitySequential adds six clusters one at a time, then deletes them. It fails once the management API
+// has not answered from the host for 90s, so devenv test exports logs and checks the API from inside the session.
+func capacitySequential(ctx context.Context, e *devenv.Environment) error {
+	dyn, err := kube.Dynamic(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	cs, err := kube.Client(e.MgmtKubeconfig)
+	if err != nil {
+		return err
+	}
+	clusters := dyn.Resource(kube.ClusterGVR).Namespace(devenv.WorkloadNamespace)
+	work, err := clusters.Get(ctx, devenv.WorkloadCluster, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	copyOf := func(name string) *unstructured.Unstructured {
+		spec, _, _ := unstructured.NestedMap(work.Object, "spec")
+		delete(spec, "controlPlaneEndpoint")
+		delete(spec, "infrastructureRef")
+		delete(spec, "controlPlaneRef")
+		c := &unstructured.Unstructured{Object: map[string]any{"apiVersion": work.GetAPIVersion(), "kind": "Cluster", "spec": spec}}
+		c.SetName(name)
+		c.SetNamespace(devenv.WorkloadNamespace)
+		c.SetLabels(map[string]string{"cni": "kindnet"})
+		return c
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	go func() {
+		var failingSince time.Time
+		for ctx.Err() == nil {
+			attempt, done := context.WithTimeout(ctx, 5*time.Second)
+			_, err := cs.Discovery().RESTClient().Get().AbsPath("/readyz").DoRaw(attempt)
+			done()
+			switch {
+			case err == nil:
+				failingSince = time.Time{}
+			case failingSince.IsZero():
+				failingSince = time.Now()
+			case time.Since(failingSince) > 90*time.Second:
+				fmt.Printf("OBS: hook: management API failing from the host since %s: %v\n", failingSince.Format("15:04:05"), err)
+				cancel(fmt.Errorf("management API unreachable from the host since %s: %w", failingSince.Format("15:04:05"), err))
+				return
+			}
+			time.Sleep(3 * time.Second)
+		}
+	}()
+	fail := func(err error) error { return errors.Join(context.Cause(ctx), err) }
+	var names []string
+	for i := 1; i <= 6; i++ {
+		name := fmt.Sprintf("extra%d", i)
+		start := time.Now()
+		if _, err := clusters.Create(ctx, copyOf(name), metav1.CreateOptions{}); err != nil {
+			return fail(err)
+		}
+		names = append(names, name)
+		if err := ready.Wait(ctx, ready.Gate{Name: name + " Available", Timeout: 12 * time.Minute, Interval: 5 * time.Second,
+			Check: func(ctx context.Context) error { return kube.ClusterAvailable(ctx, dyn, devenv.WorkloadNamespace, name) }}); err != nil {
+			return fail(err)
+		}
+		if err := ready.Wait(ctx, ready.Gate{Name: name + " addon", Timeout: 7 * time.Minute, Interval: 5 * time.Second,
+			Check: func(ctx context.Context) error {
+				return kube.PackageInstallReconciled(ctx, dyn, devenv.WorkloadNamespace, name+"-greeting-controller")
+			}}); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("OBS: hook: %s Available with its addon after %s at %s\n", name, time.Since(start).Round(time.Second), time.Now().Format("15:04:05"))
+	}
+	for _, name := range names {
+		if err := clusters.Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+			return fail(err)
+		}
+	}
+	fmt.Printf("OBS: hook: deleted %d clusters at %s\n", len(names), time.Now().Format("15:04:05"))
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-time.After(4 * time.Minute):
+		return nil
+	}
+}

@@ -8,7 +8,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [massdelete-hook, capacity-repro, upgrade-redeploy]
+        script: [capseq]
+        attempt: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
