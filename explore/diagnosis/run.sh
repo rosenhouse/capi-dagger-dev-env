@@ -175,6 +175,39 @@ greetingok() {
   obs "greeting: $(grep -l 'passed\.' "$RUNNER_TEMP"/out-GOK*.log | wc -l) of $(ls "$RUNNER_TEMP"/out-GOK*.log | wc -l) passed"
 }
 
+# syncer makes the example's greeting-syncer, a Management package, exit on start.
+syncer() {
+  setup_greeting
+  local yaml=$G/config/greeting-syncer/greeting-syncer.yaml t=$SECONDS pid
+  sed -i 's|^        image: greeting-syncer$|        image: greeting-syncer\n        args: ["--metrics-bind-address=:8443"]|' "$yaml"
+  grep -n -A1 'image: greeting-syncer' "$yaml"
+  pid=$(cd "$G" && "$REPO/explore/lib/up-bg.sh" "$RUNNER_TEMP/out-S1-up.log" 1200 -- "$RUNNER_TEMP/greeting-devenv" up --name sy)
+  obs "[S1-up] up printed 'is up': ${pid:+yes} after $((SECONDS - t))s"
+  grep -v '^\s*$' "$RUNNER_TEMP/out-S1-up.log" | tail -8
+  if [ -n "$pid" ]; then
+    local k=$G/.devenv/sy/mgmt.kubeconfig
+    obs "[S1-up] PackageInstalls: $(kubectl --kubeconfig "$k" get pkgi -A --no-headers 2>&1 | tr -s ' ' | tr '\n' ';')"
+    obs "[S1-up] greeting-syncer pods: $(kubectl --kubeconfig "$k" get pods -n greeting-syncer --no-headers 2>&1 | tr -s ' ' | tr '\n' ';')"
+    (cd "$G" && timeout 300 "$RUNNER_TEMP/greeting-devenv" down --name sy) 2>&1 | tail -2
+    wait_gone "$pid" 120
+  fi
+  RUN_DIR=$G RUN_BIN=$RUNNER_TEMP/greeting-devenv run_case S2-test 1500 -- test --name sy
+  RUN_DIR=$G inspect S2-test sy
+  RUN_DIR=$G grep_logs S2-test sy 'flag provided but not defined' "greeting-syncer's own error"
+}
+
+# probe gives the example's addon-manager a readiness probe that never passes.
+probe() {
+  setup_greeting
+  local yaml=$G/config/addon-manager/addon-manager.yaml
+  sed -i 's|^        image: addon-manager$|        image: addon-manager\n        readinessProbe:\n          httpGet:\n            path: /readyz\n            port: 8081|' "$yaml"
+  tail -6 "$yaml"
+  RUN_DIR=$G RUN_BIN=$RUNNER_TEMP/greeting-devenv run_case R1-probe 1500 -- test --name pr
+  RUN_DIR=$G inspect R1-probe pr
+  RUN_DIR=$G grep_logs R1-probe pr 'Readiness probe failed' "readiness probe failure"
+  RUN_DIR=$G grep_logs R1-probe pr '8081' "probe port 8081"
+}
+
 greeting() {
   setup_greeting
   local yaml=$G/config/greeting-controller/greeting-controller.yaml

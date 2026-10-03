@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [greeting, flake, greetingok]
+        job: [syncer, probe, flake]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
