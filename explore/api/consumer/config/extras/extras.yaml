@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: extras
+  namespace: default
+data:
+  hello: world
