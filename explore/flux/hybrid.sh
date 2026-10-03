@@ -4,6 +4,17 @@ source "$(dirname "$0")/lib.sh"
 setup_consumer
 cd "$W" || exit 1
 export FLUXCO_SCENARIO=hybrid
+
+echo "=== What a rootfs made from a source subdirectory holds"
+mkdir -p "$RUNNER_TEMP/rootfs"
+GOWORK=off go run ./cmd/rootfsprobe "$RUNNER_TEMP/rootfs" 2>&1 | grep -v '^$' | tail -8
+for tarball in "$RUNNER_TEMP"/rootfs/*.tar; do
+  d=${tarball%.tar}; mkdir -p "$d"; tar -xf "$tarball" -C "$d"
+  layers=$(jq -r '.[0].Layers[]' "$d/manifest.json")
+  files=$(for l in $layers; do tar -tf "$d/$l"; done | grep -v '/$' | sort)
+  obs "$(basename "$d") AsTarball: $(echo "$layers" | wc -w) layer(s), $(echo "$files" | wc -l) files: $(echo "$files" | head -6 | tr '\n' ' ')"
+done
+
 up hy || { summary; exit 1; }
 
 echo "=== Flux install through kapp-controller"
@@ -34,6 +45,9 @@ podsh "$MGMT" crane "$CRANE" /busybox/sh "crane manifest --insecure $MANIFESTS; 
 LAYER_MT=$(head -1 "$RUNNER_TEMP/manifest.txt" | jq -r '.layers[0].mediaType' 2>/dev/null)
 obs "hook artifact manifest mediaType=$(head -1 "$RUNNER_TEMP/manifest.txt" | jq -r '.mediaType' 2>/dev/null) config=$(head -1 "$RUNNER_TEMP/manifest.txt" | jq -r '.config.mediaType' 2>/dev/null) layer=$LAYER_MT"
 
+podsh "$MGMT" export "$CRANE" /busybox/sh "crane export --insecure $HOST/rootfs-probe - | tar -tf - | grep -v '/\$' | sort > /tmp/f; echo \$(wc -l < /tmp/f) files; head -6 /tmp/f" | tee "$RUNNER_TEMP/export.txt"
+obs "rootfs-probe pushed by devenv holds: $(tr '\n' ' ' < "$RUNNER_TEMP/export.txt")"
+
 echo "=== OCIRepository probes"
 oci() { # NAME URLREF EXTRA
   local name=$1 r=$2 extra=$3
@@ -49,12 +63,7 @@ $extra
 EOF
 }
 oci om-insecure "$MANIFESTS" "  insecure: true"
-oci om-secure "$MANIFESTS" ""
-oci om-fluxmt "$MANIFESTS" "  insecure: true
-  layerSelector: {mediaType: application/vnd.cncf.flux.content.v1.tar+gzip}"
 obs "OCIRepository insecure, no layerSelector: $(ready oci om-insecure 120s)"
-obs "OCIRepository without insecure: $(ready oci om-secure 60s)"
-obs "OCIRepository with Flux layer media type: $(ready oci om-fluxmt 30s)"
 
 echo "=== Kustomization into the workload cluster through CAPI's kubeconfig Secret"
 t=$SECONDS
@@ -106,72 +115,6 @@ obs "Kustomization manager-mgmt (mgmt, tag latest): $(ready ks manager-mgmt 4m)"
 M1=$(served "$MGMT" http://manager.manager:8080)
 obs "manager serves: $M1"
 
-echo "=== HelmRelease from an Images-hook chart image"
-oci chart-copy "$CHART" "  insecure: true
-  layerSelector: {mediaType: \"$LAYER_MT\", operation: copy}"
-oci chart-extract "$CHART" "  insecure: true"
-obs "chart OCIRepository (copy): $(ready oci chart-copy 60s)"
-obs "chart OCIRepository (extract): $(ready oci chart-extract 60s)"
-for mode in copy extract; do
-  cat <<EOF | k apply -f - >/dev/null
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata: {name: agent-helm-$mode, namespace: default}
-spec:
-  interval: 1m
-  chartRef: {kind: OCIRepository, name: chart-$mode, namespace: default}
-  kubeConfig: {secretRef: {name: work-kubeconfig}}
-  targetNamespace: agent-helm-$mode
-  install: {createNamespace: true}
-  values: {image: "$AGENT"}
-EOF
-done
-obs "HelmRelease from chart image (copy): $(ready hr agent-helm-copy 3m)"
-obs "HelmRelease from chart image (extract): $(ready hr agent-helm-extract 60s)"
-
-echo "=== Workaround: push a real Helm chart and a Flux artifact from inside the management cluster"
-helm package "$W/chart/agent" -d "$RUNNER_TEMP" >/dev/null
-k -n default create configmap chart --from-file="$RUNNER_TEMP/agent-0.1.0.tgz" >/dev/null
-podsh "$MGMT" helmpush alpine/helm:3.19.0 sh "helm push /in/agent-0.1.0.tgz oci://$HOST/charts --plain-http" chart
-k -n default create configmap agentdeploy --from-file="$W/deploy/agent" >/dev/null
-podsh "$MGMT" fluxpush ghcr.io/fluxcd/flux-cli:v$FLUX_VERSION sh "mkdir /tmp/d && cp -L /in/*.yaml /tmp/d/ && flux push artifact oci://$HOST/agent-flux:dev --path=/tmp/d --source=local --revision=dev --insecure-registry" agentdeploy
-cat <<EOF | k apply -f - >/dev/null
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata: {name: session, namespace: default}
-spec:
-  type: oci
-  interval: 1m
-  url: oci://$HOST/charts
-  insecure: true
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata: {name: agent-helmrepo, namespace: default}
-spec:
-  interval: 1m
-  chart:
-    spec:
-      chart: agent
-      version: 0.1.0
-      sourceRef: {kind: HelmRepository, name: session}
-  kubeConfig: {secretRef: {name: work-kubeconfig}}
-  targetNamespace: agent-helmrepo
-  install: {createNamespace: true}
-  values: {image: "$AGENT"}
----
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: OCIRepository
-metadata: {name: flux-native, namespace: default}
-spec:
-  interval: 1m
-  url: oci://$HOST/agent-flux
-  ref: {tag: dev}
-  insecure: true
-EOF
-obs "HelmRelease from HelmRepository type oci (helm push workaround): $(ready hr agent-helmrepo 3m)"
-obs "OCIRepository of flux push artifact (workaround): $(ready oci flux-native 60s)"
-
 echo "=== Redeploy"
 k get apps -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,FETCH:.spec.fetch[0].imgpkgBundle.image,DEPLOYED:.status.deploy.startedAt
 FLUXPODS_BEFORE=$(k -n flux-system get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}')
@@ -195,7 +138,8 @@ MANIFESTS2=$(ref agentManifestsRef)
 k -n default patch "$(kind_of oci)/om-insecure" --type merge -p "{\"spec\":{\"ref\":{\"digest\":\"${MANIFESTS2#*@}\"}}}" >/dev/null
 k -n default patch "$(kind_of ks)/agent-work" --type merge -p "{\"spec\":{\"images\":[{\"name\":\"agent\",\"newName\":\"${AGENT2%@*}\",\"digest\":\"${AGENT2#*@}\"}]}}" >/dev/null
 flux --kubeconfig "$MGMT" -n default reconcile kustomization agent-work --with-source --timeout 3m 2>&1 | tail -2
-obs "after repin + flux reconcile ($(since $t)s): agent serves $(served "$WORK" http://agent.agent:8080)"
+kw -n agent rollout status deploy/agent --timeout=2m >/dev/null
+obs "after repin + flux reconcile + rollout ($(since $t)s): agent serves $(served "$WORK" http://agent.agent:8080)"
 k -n manager rollout restart deploy/manager >/dev/null && k -n manager rollout status deploy/manager --timeout=2m >/dev/null
 obs "after rollout restart: manager serves $(served "$MGMT" http://manager.manager:8080)"
 

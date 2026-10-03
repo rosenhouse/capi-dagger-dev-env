@@ -16,9 +16,11 @@ import (
 // artifacts are Flux sources built from the source snapshot as plain container images.
 func artifacts(c *dagger.Client, src *dagger.Directory, version string) map[string]*dagger.Container {
 	return map[string]*dagger.Container{
-		"agent-manifests":   c.Container().WithRootfs(src.Directory("deploy/agent")),
-		"manager-manifests": c.Container().WithRootfs(src.Directory("deploy/manager")),
+		"agent-manifests":   c.Container().WithRootfs(c.Directory().WithDirectory(".", src.Directory("deploy/agent"))),
+		"manager-manifests": c.Container().WithRootfs(c.Directory().WithDirectory(".", src.Directory("deploy/manager"))),
 		"agent-chart":       c.Container().WithRootfs(c.Directory().WithDirectory("agent", src.Directory("chart/agent"))),
+		// rootfs-probe shows what a subdirectory of the snapshot holds as a rootfs.
+		"rootfs-probe": c.Container().WithRootfs(src.Directory("deploy/agent")),
 	}
 }
 
@@ -55,8 +57,10 @@ func config() devenv.Config {
 			{Name: "flux", RefName: "flux.fluxco.example.com", Config: "config/flux"},
 			refs,
 		}
-	case "fluxonly":
+	case "workloadonly":
 		cfg.Packages = []devenv.Package{{Name: "dummy", RefName: "dummy.fluxco.example.com", Config: "config/dummy", On: devenv.Workload}}
+	case "fluxonly":
+		cfg.Packages = []devenv.Package{{Name: "dummy", RefName: "dummy.fluxco.example.com", Config: "config/dummy"}}
 	case "kustomize":
 		cfg.Packages = []devenv.Package{{Name: "manager", RefName: "manager.fluxco.example.com", Config: "config/kustomize", Images: []string{"manager"}}}
 	case "refs":

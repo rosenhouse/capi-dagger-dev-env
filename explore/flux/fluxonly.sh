@@ -8,7 +8,7 @@ echo "=== No packages"
 out=$(FLUXCO_SCENARIO=nopkg "$D" up --name np 2>&1)
 obs "up with Commands and Images but no Packages: exit=$? output: $(echo "$out" | tr '\n' ' ' | head -c 300)"
 
-echo "=== A placeholder Workload package"
+echo "=== A placeholder Management package"
 export FLUXCO_SCENARIO=fluxonly
 up fo || { summary; exit 1; }
 
